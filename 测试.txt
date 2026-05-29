@@ -1,0 +1,10 @@
+SuperBizAgent / AiOps 仓库连接测试
+
+创建时间：2026-05-29
+说明：此文件用于验证 Git 推送到 GitHub 是否正常。
+
+项目简介：
+- 基于 Spring Boot 的智能问答与 AIOps 运维系统
+- 支持 RAG 向量检索、多 Agent 协作、告警分析
+
+如果你能看到本文件，说明代码已成功上传到 GitHub。
