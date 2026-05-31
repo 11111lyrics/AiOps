@@ -65,7 +65,12 @@ document:
 # RAG 配置
 rag:
   top-k: 3
+  recall-top-k: 10
   model: "qwen3-max"
+  rerank:
+    enabled: true
+    model: qwen3-rerank
+    instruct: "Given a web search query, retrieve relevant passages that answer the query."
 
 # 启动自动导入配置
 aiops:

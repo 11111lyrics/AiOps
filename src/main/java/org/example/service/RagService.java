@@ -31,7 +31,7 @@ public class RagService {
     private static final Logger logger = LoggerFactory.getLogger(RagService.class);
 
     @Autowired
-    private VectorSearchService vectorSearchService;
+    private RetrievalService retrievalService;
 
     @Value("${dashscope.api.key}")
     private String apiKey;
@@ -77,9 +77,9 @@ public class RagService {
         try {
             logger.info("收到 RAG 流式查询: {}", question);
 
-            // 1. 从向量数据库检索相关文档
-            List<VectorSearchService.SearchResult> searchResults = 
-                vectorSearchService.searchSimilarDocuments(question, topK);
+            // 1. 两阶段检索：Milvus 粗召回 → 百炼重排
+            List<VectorSearchService.SearchResult> searchResults =
+                retrievalService.retrieve(question);
 
             // 发送检索结果
             callback.onSearchResults(searchResults);

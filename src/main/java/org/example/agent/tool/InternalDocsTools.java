@@ -1,13 +1,13 @@
 package org.example.agent.tool;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.service.RetrievalService;
 import org.example.service.VectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -24,20 +24,17 @@ public class InternalDocsTools {
     /** 工具名常量，用于动态构建提示词 */
     public static final String TOOL_QUERY_INTERNAL_DOCS = "queryInternalDocs";
     
-    private final VectorSearchService vectorSearchService;
-    
-    @Value("${rag.top-k:3}")
-    private int topK = 3; // 默认值
+    private final RetrievalService retrievalService;
     
     private final ObjectMapper objectMapper = new ObjectMapper();
     
     /**
      * 构造函数注入依赖
-     * Spring 会自动注入 VectorSearchService
+     * Spring 会自动注入 RetrievalService
      */
     @Autowired
-    public InternalDocsTools(VectorSearchService vectorSearchService) {
-        this.vectorSearchService = vectorSearchService;
+    public InternalDocsTools(RetrievalService retrievalService) {
+        this.retrievalService = retrievalService;
     }
     
     /**
@@ -56,9 +53,9 @@ public class InternalDocsTools {
         
 
         try {
-            // 使用向量搜索服务检索相关文档
-            List<VectorSearchService.SearchResult> searchResults = 
-                    vectorSearchService.searchSimilarDocuments(query, topK);
+            // 两阶段检索：Milvus 粗召回 → 百炼重排
+            List<VectorSearchService.SearchResult> searchResults =
+                    retrievalService.retrieve(query);
             
             if (searchResults.isEmpty()) {
                 return "{\"status\": \"no_results\", \"message\": \"No relevant documents found in the knowledge base.\"}";

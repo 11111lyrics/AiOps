@@ -115,8 +115,11 @@ public class VectorSearchService {
     public static class SearchResult {
         private String id;
         private String content;
+        /** Milvus 向量距离分（L2，越小越相似） */
         private float score;
         private String metadata;
+        /** 百炼重排语义相关分（0~1，越大越相关；未重排时为 null） */
+        private Float rerankScore;
 
     }
 }
