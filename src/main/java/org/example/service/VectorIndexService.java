@@ -11,6 +11,7 @@ import lombok.Getter;
 import lombok.Setter;
 import org.example.constant.MilvusConstants;
 import org.example.dto.DocumentChunk;
+import org.example.service.document.DocumentProcessorRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,7 +19,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
@@ -41,6 +41,9 @@ public class VectorIndexService {
 
     @Autowired
     private DocumentChunkService chunkService;
+
+    @Autowired
+    private DocumentProcessorRegistry processorRegistry;
 
     @Value("${file.upload.path}")
     private String uploadPath;
@@ -70,8 +73,8 @@ public class VectorIndexService {
             result.setDirectoryPath(directory.getAbsolutePath());
 
             // 获取所有支持的文件
-            File[] files = directory.listFiles((dir, name) -> 
-                name.endsWith(".txt") || name.endsWith(".md")
+            File[] files = directory.listFiles((dir, name) ->
+                processorRegistry.isSupportedFile(name)
             );
 
             if (files == null || files.length == 0) {
@@ -131,18 +134,18 @@ public class VectorIndexService {
 
         logger.info("开始索引文件: {}", path);
 
-        // 1. 读取文件内容
-        String content = Files.readString(path);
-        logger.info("读取文件: {}, 内容长度: {} 字符", path, content.length());
+        if (!processorRegistry.isSupportedFile(path.toString())) {
+            throw new IllegalArgumentException("不支持的文件类型: " + filePath);
+        }
 
-        // 2. 删除该文件的旧数据（如果存在）
+        // 1. 删除该文件的旧数据（如果存在）
         deleteExistingData(path.toString());
 
-        // 3. 文档分片
-        List<DocumentChunk> chunks = chunkService.chunkDocument(content, path.toString());
+        // 2. 提取 + 分片（按文件类型自动路由）
+        List<DocumentChunk> chunks = chunkService.chunkDocument(path);
         logger.info("文档分片完成: {} -> {} 个分片", filePath, chunks.size());
 
-        // 4. 为每个分片生成向量并插入 Milvus
+        // 3. 为每个分片生成向量并插入 Milvus
         for (int i = 0; i < chunks.size(); i++) {
             DocumentChunk chunk = chunks.get(i);
             
@@ -244,6 +247,11 @@ public class VectorIndexService {
         // 标题信息
         if (chunk.getTitle() != null && !chunk.getTitle().isEmpty()) {
             metadata.put("title", chunk.getTitle());
+        }
+
+        // 分片额外元数据（如 PDF 页码）
+        if (chunk.getExtraMetadata() != null) {
+            chunk.getExtraMetadata().forEach(metadata::put);
         }
         
         return metadata;

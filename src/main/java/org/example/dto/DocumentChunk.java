@@ -36,6 +36,11 @@ public class DocumentChunk {
      */
     private String title;
 
+    /**
+     * 额外元数据（如 PDF 页码），写入 Milvus metadata
+     */
+    private java.util.Map<String, Object> extraMetadata;
+
     public DocumentChunk() {
     }
 

@@ -9,7 +9,7 @@ server:
 file:
   upload:
     path: ./uploads
-    allowed-extensions: txt,md
+    allowed-extensions: txt,md,pdf,doc,docx
 
 milvus:
   host: ${MILVUS_HOST:localhost}
