@@ -40,7 +40,7 @@ public class VectorEmbeddingService {
         // 验证 API Key
         if (apiKey == null || apiKey.trim().isEmpty() || apiKey.equals("your-api-key-here")) {
             logger.error("API Key 未正确配置！当前值: {}", apiKey);
-            throw new IllegalStateException("请设置环境变量 DASHSCOPE_API_KEY 或在 application.yml 中配置正确的 API Key");
+            throw new IllegalStateException("请在 application.yml 中配置正确的 dashscope.api.key");
         }
         
         // 打印 API Key 前缀用于调试（不打印完整 Key 保证安全）

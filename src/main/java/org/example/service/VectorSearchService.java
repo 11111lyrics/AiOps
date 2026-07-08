@@ -42,20 +42,32 @@ public class VectorSearchService {
      * @return 搜索结果列表
      */
     public List<SearchResult> searchSimilarDocuments(String query, int topK) {
+        return searchSimilarDocuments(query, topK, MilvusConstants.MILVUS_COLLECTION_NAME);
+    }
+
+    /**
+     * 在指定集合中搜索相似向量（供经验召回等场景复用）
+     *
+     * @param query          查询文本
+     * @param topK           返回最相似的 K 个结果
+     * @param collectionName 目标集合名称
+     * @return 搜索结果列表
+     */
+    public List<SearchResult> searchSimilarDocuments(String query, int topK, String collectionName) {
         try {
-            logger.info("开始搜索相似文档, 查询: {}, topK: {}", query, topK);
+            logger.info("开始搜索相似向量, 集合: {}, 查询: {}, topK: {}", collectionName, query, topK);
 
             // 1. 确保 collection 已加载到内存（Milvus 重启或新实例后需要重新加载）
             R<RpcStatus> loadResponse = milvusClient.loadCollection(
                 LoadCollectionParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                    .withCollectionName(collectionName)
                     .build()
             );
             // 65535 表示已经加载，0 表示加载成功，其他状态才是真正失败
             if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
                 throw new RuntimeException("加载 collection 失败: " + loadResponse.getMessage());
             }
-            logger.debug("collection '{}' 已确认加载", MilvusConstants.MILVUS_COLLECTION_NAME);
+            logger.debug("collection '{}' 已确认加载", collectionName);
 
             // 2. 将查询文本向量化
             List<Float> queryVector = embeddingService.generateQueryVector(query);
@@ -63,7 +75,7 @@ public class VectorSearchService {
 
             // 3. 构建搜索参数
             SearchParam searchParam = SearchParam.newBuilder()
-                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                    .withCollectionName(collectionName)
                     .withVectorFieldName("vector")
                     .withVectors(Collections.singletonList(queryVector))
                     .withTopK(topK)

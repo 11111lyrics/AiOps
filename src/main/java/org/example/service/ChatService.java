@@ -5,6 +5,7 @@ import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
+import org.example.config.ClsProperties;
 import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
 import org.example.agent.tool.QueryLogsTools;
@@ -43,6 +44,9 @@ public class ChatService {
 
     @Autowired
     private ToolCallbackProvider tools;
+
+    @Autowired
+    private ClsProperties clsProperties;
 
     @Value("${spring.ai.dashscope.api-key}")
     private String dashScopeApiKey;
@@ -87,6 +91,16 @@ public class ChatService {
      * @return 完整的系统提示词
      */
     public String buildSystemPrompt(List<Map<String, String>> history) {
+        return buildSystemPrompt(history, null);
+    }
+
+    /**
+     * 构建系统提示词（包含召回的历史经验 + 历史消息）
+     * @param history          历史消息列表
+     * @param experienceBlock  召回的历史经验注入块（可空）
+     * @return 完整的系统提示词
+     */
+    public String buildSystemPrompt(List<Map<String, String>> history, String experienceBlock) {
         StringBuilder systemPromptBuilder = new StringBuilder();
         
         // 基础系统提示
@@ -94,7 +108,20 @@ public class ChatService {
         systemPromptBuilder.append("当用户询问时间相关问题时，使用 getCurrentDateTime 工具。\n");
         systemPromptBuilder.append("当用户需要查询公司内部文档、流程、最佳实践或技术指南时，使用 queryInternalDocs 工具。\n");
         systemPromptBuilder.append("当用户需要查询 Prometheus 告警、监控指标或系统告警状态时，使用 queryPrometheusAlerts 工具。\n");
-        systemPromptBuilder.append("当用户需要查询腾讯云日志时，请调用腾讯云mcp服务查询,默认查询地域ap-guangzhou,查询时间范围为近一个月。\n\n");
+        systemPromptBuilder.append("当用户需要查询腾讯云日志（CLS）时，使用 MCP 提供的 CLS 工具，推荐调用顺序：\n");
+        systemPromptBuilder.append("1. GetTopicInfoByName：按名称查找日志主题，获取 TopicId（Region 默认 ap-chengdu）\n");
+        systemPromptBuilder.append("2. TextToSearchLogQuery：将自然语言转为 CQL 查询语句（务必在 SearchLog 前调用）\n");
+        systemPromptBuilder.append("3. SearchLog：执行日志检索（From/To 为毫秒时间戳，默认查近 15 分钟）\n");
+        systemPromptBuilder.append("4. DescribeLogContext：查看某条日志的前后上下文（需 PkgId、PkgLogId、Time）\n");
+        systemPromptBuilder.append("告警相关可使用 DescribeAlarms、DescribeAlertRecordHistory、GetAlarmLog。\n");
+        systemPromptBuilder.append("时间转换使用 ConvertTimeStringToTimestamp / ConvertTimestampToTimeString。\n");
+        systemPromptBuilder.append("Region 参数必须使用连字符格式（如 ap-chengdu），禁止编造日志内容。\n\n");
+        systemPromptBuilder.append(clsProperties.buildTopicsPromptBlock());
+
+        // 注入召回的历史经验（仅供参考，必须验证）
+        if (experienceBlock != null && !experienceBlock.isBlank()) {
+            systemPromptBuilder.append(experienceBlock);
+        }
         
         // 添加历史消息
         if (!history.isEmpty()) {

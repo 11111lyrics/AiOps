@@ -106,40 +106,30 @@ POST /api/ai_ops
 
 ### application.yml
 
-```yaml
-server:
-  port: 9900
-
-# Milvus 向量数据库
-milvus:
-  host: localhost
-  port: 19530
-
-# 阿里云 DashScope
-spring:
-  ai:
-    dashscope:
-      api-key: "${DASHSCOPE_API_KEY}" // 环境变量
-
-# RAG 配置
-rag:
-  top-k: 3
-  model: "qwen3-max"
-
-# 文档分片
-document:
-  chunk:
-    max-size: 800
-    overlap: 100
-```
-
-### 环境变量
-
-复制 `.env.example` 为 `.env` 并填入密钥（勿提交 `.env`）：
+复制 `application-example.yml` 为 `application.yml` 并填入真实配置（含 API Key，勿提交 Git）：
 
 ```bash
-export DASHSCOPE_API_KEY=your-api-key
-# 可选：MILVUS_HOST、PROMETHEUS_BASE_URL、CLS_* 等，见 .env.example
+cp src/main/resources/application-example.yml src/main/resources/application.yml
+```
+
+主要配置项：
+
+```yaml
+milvus:
+  host: 192.168.150.101   # Milvus 主机
+  port: 19530
+
+spring:
+  datasource:
+    url: jdbc:mysql://192.168.150.101:3306/superbiz_agent?...
+    username: root
+    password: ""
+  ai:
+    dashscope:
+      api-key: your-dashscope-api-key
+
+prometheus:
+  base-url: http://192.168.150.101:9090
 ```
 
 
@@ -148,8 +138,8 @@ export DASHSCOPE_API_KEY=your-api-key
 ### 1. 环境准备
 
 ```bash
-# 设置 API Key
-export DASHSCOPE_API_KEY=your-api-key
+# 从示例复制并编辑配置
+cp src/main/resources/application-example.yml src/main/resources/application.yml
 ```
 
 ### 2. 启动应用

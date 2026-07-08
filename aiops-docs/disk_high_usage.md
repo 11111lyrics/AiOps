@@ -13,41 +13,30 @@
 - 数据库损坏
 - 系统性能下降
 
+## 环境说明
+
+- **Region**: `ap-chengdu`
+- **日志路径**: `/data/tjxt/logs/{service}/**/spring.log`（192.168.150.101）
+- **CLS 主题**: `tjxt-dev-{service}-log-ap-chengdu`
+- 磁盘指标来自 Prometheus；应用日志用 MCP SearchLog
+
 ## 排查步骤
 
 ### 步骤1: 获取当前时间
-**工具**: `get_current_time`
-**目的**: 记录告警时间，用于日志查询
+**工具**: `getCurrentDateTime`
 
-### 步骤2: 查询系统磁盘使用情况
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `system-metrics`
-- **时间范围**: 最近30分钟
-- **查询条件**: `disk_usage:>80 OR disk_full:true`
+### 步骤2: 查询 Prometheus 告警
+**工具**: `queryPrometheusAlerts`
 
-**查询示例**:
-```
-地域: ap-guangzhou
-日志主题: system-metrics
-时间范围: [当前时间-30分钟] 到 [当前时间]
-查询语句: disk_usage > 80 OR filesystem:full
-```
+### 步骤3: 查询磁盘/日志写入失败相关日志
+**工具**: MCP `TextToSearchLogQuery` → `SearchLog`
+- **Region**: `ap-chengdu`
+- **日志主题**: 优先 `tjxt-dev-media-service-log-ap-chengdu` 或告警 label 对应服务
+- **CQL 示例**: `"No space left on device" OR "disk full" OR ERROR`
 
-### 步骤3: 查询应用日志
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `application-logs`
-- **查询条件**: `No space left on device OR disk full`
-
-### 步骤4: 分析磁盘占用
-从日志中分析：
-- 哪个目录占用空间最大
-- 日志文件大小
-- 临时文件数量
-- 数据文件增长趋势
+### 步骤4: 检索内部文档
+**工具**: `queryInternalDocs`
+**关键词**: `HighDiskUsage 磁盘`
 
 ## 常见原因分析
 

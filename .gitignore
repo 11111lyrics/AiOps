@@ -56,9 +56,10 @@ uploads/
 /server.pid
 
 ### Secrets & local config ###
-.env
-.env.*
-!.env.example
+src/main/resources/application.yml
+!src/main/resources/application-example.yml
+src/main/resources/mcp-servers.json
+!src/main/resources/mcp-servers.json.example
 application-local.yml
 application-local.yaml
 **/application-local.yml

@@ -12,41 +12,41 @@
 - 可能造成经济损失
 - 影响公司声誉
 
+## 环境说明
+
+- **Region**: `ap-chengdu`
+- **入口排查**: `tjxt-dev-gateway-service-log-ap-chengdu`
+- **鉴权**: `tjxt-dev-auth-service-log-ap-chengdu`
+- **业务服务**: `tjxt-dev-{service}-log-ap-chengdu`（见 tjxt_microservices_overview.md）
+
 ## 排查步骤
 
 ### 步骤1: 获取当前时间
-**工具**: `get_current_time`
-**目的**: 记录故障发生时间，用于后续分析
+**工具**: `getCurrentDateTime`
 
-### 步骤2: 查询服务状态日志
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `application-logs`
-- **时间范围**: 最近15分钟
-- **查询条件**: `level:ERROR OR level:FATAL OR status:500`
+### 步骤2: 查询 Prometheus 告警
+**工具**: `queryPrometheusAlerts`
 
-**查询示例**:
-```
-地域: ap-guangzhou
-日志主题: application-logs
-时间范围: [当前时间-15分钟] 到 [当前时间]
-查询语句: (level:ERROR OR level:FATAL) AND service_name:*
-```
+### 步骤3: 查询网关 ERROR 日志
+**工具**: MCP `TextToSearchLogQuery` → `SearchLog`
+- **Region**: `ap-chengdu`
+- **主题**: `tjxt-dev-gateway-service-log-ap-chengdu`
+- **CQL 示例**: `ERROR OR 503 OR 504 OR "Connection refused" OR "LoadBalancer"`
 
-### 步骤3: 查询系统事件日志
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `system-events`
-- **查询条件**: `event:restart OR event:crash OR event:oom_kill`
+### 步骤4: 查询鉴权服务日志
+- **主题**: `tjxt-dev-auth-service-log-ap-chengdu`
+- **CQL 示例**: `ERROR OR 401 OR 403 OR "Invalid token" OR JWT`
 
-### 步骤4: 检查依赖服务状态
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `application-logs`
-- **查询条件**: `downstream_service OR database OR redis OR mq`
+### 步骤5: 查询受影响业务服务日志
+- **主题**: 告警 label 中的 service，如 `tjxt-dev-user-service-log-ap-chengdu`
+- **CQL 示例**: `ERROR OR Exception OR FATAL`
+
+### 步骤6: 查看异常栈上下文
+**工具**: MCP `DescribeLogContext`
+
+### 步骤7: 检索内部文档
+**工具**: `queryInternalDocs`
+**关键词**: `ServiceUnavailable 服务不可用 gateway`
 
 ## 常见原因分析
 

@@ -12,41 +12,33 @@
 - 应用崩溃或重启
 - 系统swap频繁，性能急剧下降
 
+## 环境说明
+
+- **Region**: `ap-chengdu`
+- **指标来源**: Prometheus（`queryPrometheusAlerts`）
+- **应用日志**: `tjxt-dev-{service}-log-ap-chengdu`
+- **CLS 查询**: MCP 工具链（见 cls_log_query_guide.md）
+
 ## 排查步骤
 
 ### 步骤1: 获取当前时间
-**工具**: `get_current_time`
-**目的**: 确定告警发生的时间范围
+**工具**: `getCurrentDateTime`
 
-### 步骤2: 查询系统监控日志
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `system-metrics`
-- **时间范围**: 最近30分钟
-- **查询条件**: `memory_usage:>85 OR event:OOM`
+### 步骤2: 查询 Prometheus 告警
+**工具**: `queryPrometheusAlerts`
 
-**查询示例**:
-```
-地域: ap-guangzhou
-日志主题: system-metrics
-时间范围: [当前时间-30分钟] 到 [当前时间]
-查询语句: memory_usage > 85 OR oom_kill:true
-```
+### 步骤3: 查询 OOM / GC 相关日志
+**工具**: MCP `TextToSearchLogQuery` → `SearchLog`
+- **Region**: `ap-chengdu`
+- **日志主题**: 告警对应服务，如 `tjxt-dev-user-service-log-ap-chengdu`
+- **CQL 示例**: `OutOfMemoryError OR "GC overhead" OR "Java heap space" OR ERROR`
 
-### 步骤3: 查询应用日志
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `application-logs`
-- **查询条件**: `OutOfMemoryError OR GC overhead`
+### 步骤4: 查看异常上下文
+**工具**: MCP `DescribeLogContext`
 
-### 步骤4: 分析内存使用情况
-从日志中提取：
-- JVM堆内存使用情况
-- GC频率和耗时
-- 是否有内存泄漏迹象
-- 大对象分配记录
+### 步骤5: 检索内部文档
+**工具**: `queryInternalDocs`
+**关键词**: `HighMemoryUsage OOM 内存`
 
 ## 常见原因分析
 

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "cls-mcp-server": {
+      "command": "C:/nvm4w/nodejs/npx.cmd",
+      "args": ["-y", "cls-mcp-server@latest"],
+      "env": {
+        "TRANSPORT": "stdio",
+        "TENCENTCLOUD_SECRET_ID": "<YOUR_SECRET_ID>",
+        "TENCENTCLOUD_SECRET_KEY": "<YOUR_SECRET_KEY>",
+        "TZ": "Asia/Shanghai"
+      }
+    }
+  }
+}

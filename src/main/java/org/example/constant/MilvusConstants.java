@@ -11,6 +11,11 @@ public class MilvusConstants {
      * Milvus 集合名称
      */
     public static final String MILVUS_COLLECTION_NAME = "biz";
+
+    /**
+     * 经验沉淀集合名称（存向量 + 不可变结构化经验，可变生命周期元数据在 MySQL）
+     */
+    public static final String EXPERIENCE_COLLECTION_NAME = "experience";
     
     /**
      * 向量维度（豆包 embedding 模型的维度）

@@ -13,6 +13,10 @@ public class MilvusProperties {
     private String password = "";
     private String database = "default";
     private Long timeout = 10000L;
+    /** 启动连接重试次数（Milvus Proxy 冷启动时可能尚未就绪） */
+    private Integer connectRetryMaxAttempts = 12;
+    /** 每次重试间隔（毫秒） */
+    private Long connectRetryIntervalMs = 5000L;
 
     public String getHost() {
         return host;

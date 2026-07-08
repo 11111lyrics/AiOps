@@ -12,42 +12,33 @@
 - 可能触发超时错误
 - 影响下游服务
 
+## 环境说明
+
+- **Region**: `ap-chengdu`
+- **入口**: `tjxt-dev-gateway-service-log-ap-chengdu`
+- **慢接口**: 按告警 service 查对应微服务主题
+- **CLS**: MCP `TextToSearchLogQuery` → `SearchLog`
+
 ## 排查步骤
 
 ### 步骤1: 获取当前时间
-**工具**: `get_current_time`
-**目的**: 确定告警发生的准确时间
+**工具**: `getCurrentDateTime`
 
-### 步骤2: 查询应用性能日志
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `application-logs`
-- **时间范围**: 最近30分钟
-- **查询条件**: `response_time:>3000 OR slow_query:true`
+### 步骤2: 查询 Prometheus 告警
+**工具**: `queryPrometheusAlerts`
 
-**查询示例**:
-```
-地域: ap-guangzhou
-日志主题: application-logs
-时间范围: [当前时间-30分钟] 到 [当前时间]
-查询语句: response_time > 3000 AND level:WARN
-```
+### 步骤3: 查询网关慢请求日志
+**工具**: MCP `SearchLog`
+- **主题**: `tjxt-dev-gateway-service-log-ap-chengdu`
+- **CQL 示例**: `timeout OR "Read timed out" OR 504 OR WARN OR ERROR`
 
-### 步骤3: 查询数据库慢查询日志
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `database-slow-query`
-- **时间范围**: 与告警时间一致
-- **查询条件**: `query_time:>1000`
+### 步骤4: 查询业务服务慢日志
+- **主题**: 告警 label 对应服务，如 `tjxt-dev-trade-service-log-ap-chengdu`
+- **CQL 示例**: `slow OR timeout OR SQLException OR feign OR "cost ms"`
 
-### 步骤4: 查询系统资源使用情况
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `system-metrics`
-- **查询条件**: `cpu_usage OR memory_usage OR disk_io`
+### 步骤5: 检索内部文档
+**工具**: `queryInternalDocs`
+**关键词**: `SlowResponse 慢响应`
 
 ## 常见原因分析
 

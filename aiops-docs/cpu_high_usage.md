@@ -12,42 +12,38 @@
 - 系统负载过高
 - 可能触发雪崩效应
 
+## 环境说明
+
+- **Region**: `ap-chengdu`
+- **指标来源**: Prometheus（`queryPrometheusAlerts`）
+- **应用日志**: 各微服务独立 CLS 主题 `tjxt-dev-{service}-log-ap-chengdu`
+- **CLS 查询**: MCP `TextToSearchLogQuery` → `SearchLog`（详见 cls_log_query_guide.md）
+
 ## 排查步骤
 
 ### 步骤1: 获取当前时间
-**工具**: `get_current_time`
-**目的**: 确定告警发生的时间范围，用于后续日志查询
+**工具**: `getCurrentDateTime`
 
-### 步骤2: 查询系统日志
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou` (广州)
-- **日志主题**: `system-metrics`
-- **时间范围**: 最近30分钟
-- **查询条件**: `level:ERROR OR cpu_usage:>80`
+### 步骤2: 查询 Prometheus 告警
+**工具**: `queryPrometheusAlerts`
+**目的**: 确认 HighCPUUsage 告警的 `service` / `instance` label
 
-**查询示例**:
-```
-地域: ap-guangzhou
-日志主题: system-metrics
-时间范围: 2024-01-20 14:00:00 到 2024-01-20 14:30:00
-查询语句: cpu_usage > 80 AND service_name:*
-```
+### 步骤3: 查询对应微服务 ERROR 日志
+**工具**: MCP `TextToSearchLogQuery` → `SearchLog`
+- **Region**: `ap-chengdu`
+- **日志主题**: 告警 label 对应服务，如 `tjxt-dev-trade-service-log-ap-chengdu`
+- **时间**: 近 30 分钟
+- **CQL 示例**: `ERROR OR TimeoutException OR "Read timed out" OR feign`
 
-### 步骤3: 分析CPU消耗进程
-查看日志中的进程信息，重点关注：
-- 进程名称和PID
-- CPU占用百分比
-- 进程启动时间
-- 进程所属服务
+### 步骤4: 分析 CPU 相关日志
+从 CLS 日志中关注：
+- 慢 SQL、Feign 超时（导致线程阻塞 CPU 空转）
+- 死循环/递归栈（DescribeLogContext 展开）
+- 定时任务重叠执行记录
 
-### 步骤4: 查询应用日志
-**工具**: `query_logs`
-**参数要求**:
-- **地域**: `ap-guangzhou`
-- **日志主题**: `application-logs`
-- **时间范围**: 与告警时间一致
-- **查询条件**: `level:ERROR OR level:WARN`
+### 步骤5: 检索内部文档
+**工具**: `queryInternalDocs`
+**关键词**: `HighCPUUsage CPU 过高`
 
 ## 常见原因分析
 

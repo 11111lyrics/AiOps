@@ -8,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -24,6 +25,7 @@ import java.util.Map;
  * 用于查询 CLS（云日志服务）的日志信息
  * 支持 Mock 模式，提供与告警关联的模拟日志数据
  */
+@ConditionalOnProperty(name = "cls.mock-enabled", havingValue = "true")
 @Component
 public class QueryLogsTools {
 
@@ -41,7 +43,7 @@ public class QueryLogsTools {
     @Value("${cls.topics.system-metrics:}")
     private String systemMetricsTopicId;
 
-    @Value("${cls.region:ap-guangzhou}")
+    @Value("${cls.region:ap-chengdu}")
     private String clsRegion;
     
     private static final DateTimeFormatter FORMATTER = DateTimeFormatter
@@ -125,10 +127,10 @@ public class QueryLogsTools {
             LogTopicsOutput output = new LogTopicsOutput();
             output.setSuccess(true);
             output.setTopics(topics);
-            output.setAvailableRegions(List.of("ap-guangzhou", "ap-shanghai", "ap-beijing", "ap-chengdu"));
-            output.setDefaultRegion("ap-guangzhou");
+            output.setAvailableRegions(List.of("ap-chengdu", "ap-shanghai", "ap-beijing", "ap-guangzhou"));
+            output.setDefaultRegion("ap-chengdu");
 
-            output.setMessage(String.format("共有 %d 个可用的日志主题。建议使用默认地域 'ap-guangzhou' 或省略 region 参数", topics.size()));
+            output.setMessage(String.format("共有 %d 个可用的日志主题。建议使用默认地域 'ap-chengdu' 或省略 region 参数", topics.size()));
             
             return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(output);
             
@@ -142,17 +144,17 @@ public class QueryLogsTools {
      * 查询日志
      * 从云日志服务查询指定条件的日志
      * 
-     * @param region 地域，如 ap-guangzhou
+     * @param region 地域，如 ap-chengdu
      * @param logTopic 日志主题，如 system-metrics, application-logs
      * @param query 查询条件，如 level:ERROR OR cpu_usage:>80
      * @param limit 返回的日志条数，默认20条
      */
     // 有效地域列表
     private static final List<String> VALID_REGIONS = List.of(
-            "ap-guangzhou", "ap-shanghai", "ap-beijing", "ap-chengdu"
+            "ap-chengdu", "ap-shanghai", "ap-beijing", "ap-guangzhou"
     );
 
-    private static final String DEFAULT_REGION = "ap-guangzhou";
+    private static final String DEFAULT_REGION = "ap-chengdu";
     
     @Tool(description = "Query logs from Cloud Log Service (CLS). " +
             "Use this tool to search application logs, system metrics, and other log data. " +
@@ -166,7 +168,7 @@ public class QueryLogsTools {
             "query (optional, defaults to a curated search if empty), " +
             "limit (optional, default 20, max 100).")
     public String queryLogs(
-            @ToolParam(description = "地域，可选值: ap-guangzhou, ap-shanghai, ap-beijing, ap-chengdu。默认 ap-guangzhou") String region,
+            @ToolParam(description = "地域，可选值: ap-chengdu, ap-shanghai, ap-beijing, ap-guangzhou。默认 ap-chengdu") String region,
             @ToolParam(description = "日志主题，如 system-metrics, application-logs, database-slow-query, system-events，也支持 CLS TopicId") String logTopic,
             @ToolParam(description = "查询条件，支持 Lucene 语法，如 level:ERROR OR cpu_usage:>80；为空时返回该主题近 5 条核心日志") String query,
             @ToolParam(description = "返回日志条数，默认20，最大100") Integer limit) {
