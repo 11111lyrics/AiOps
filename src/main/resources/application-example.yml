@@ -128,6 +128,16 @@ cls:
 
 memory:
   window-size: 6
+  # 滚动摘要：滑出窗口的旧消息由 LLM 压缩为摘要注入 system prompt
+  summary:
+    enabled: true
+    model: qwen-turbo
+    max-chars: 800
+  # 情景记忆：历史问答归档进 Milvus，供 Agent 跨会话检索
+  episodic:
+    enabled: true
+    top-k: 3
+    min-score: 0.5
 
 experience:
   enabled: true

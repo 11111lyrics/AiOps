@@ -53,6 +53,9 @@ public class MilvusClientFactory {
             // 3. 检查并创建经验集合（如果不存在）
             ensureCollection(client, MilvusConstants.EXPERIENCE_COLLECTION_NAME, "Distilled experience collection");
 
+            // 4. 检查并创建情景记忆集合（如果不存在）
+            ensureCollection(client, MilvusConstants.EPISODIC_COLLECTION_NAME, "Episodic conversation memory collection");
+
             return client;
 
         } catch (Exception e) {

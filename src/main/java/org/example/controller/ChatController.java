@@ -13,10 +13,13 @@ import lombok.Setter;
 import org.example.service.AiOpsService;
 import org.example.service.ChatMemoryService;
 import org.example.service.ChatService;
+import org.example.service.ConversationSummaryService;
+import org.example.service.EpisodicMemoryService;
 import org.example.service.ExperienceLifecycleService;
 import org.example.service.ExperienceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -49,6 +52,12 @@ public class ChatController {
 
     @Autowired
     private ChatMemoryService chatMemoryService;
+
+    @Autowired
+    private ConversationSummaryService conversationSummaryService;
+
+    @Autowired
+    private EpisodicMemoryService episodicMemoryService;
 
     @Autowired
     private ExperienceService experienceService;
@@ -95,23 +104,29 @@ public class ChatController {
             // 三层过滤召回相关历史经验，注入提示词
             String experienceBlock = experienceService.recallForPrompt(request.getQuestion());
 
-            // 构建系统提示词（经验 + 历史消息）
-            String systemPrompt = chatService.buildSystemPrompt(history, experienceBlock);
+            // 构建系统提示词（经验 + 早期对话滚动摘要）；窗口内历史走原生多轮 messages
+            String summary = conversationSummaryService.getSummary(sessionId);
+            String systemPrompt = chatService.buildSystemPrompt(summary, experienceBlock);
             
             // 创建 ReactAgent
             ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
             
-            // 执行对话
-            String fullAnswer = chatService.executeChat(agent, request.getQuestion());
+            // 执行对话（历史 + 当前问题以原生多轮消息传入）
+            List<Message> messages = chatService.buildMessages(history, request.getQuestion());
+            String fullAnswer = chatService.executeChat(agent, messages);
             
             // 更新会话历史（持久化到 MySQL）
             chatMemoryService.appendTurn(sessionId, request.getQuestion(), fullAnswer);
             logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
                 sessionId, chatMemoryService.getPairCount(sessionId));
 
-            // 异步分级提炼经验，不阻塞响应
+            // 异步：分级提炼经验 + 滚动摘要 + 情景记忆归档，不阻塞响应
             final String q = request.getQuestion();
-            executor.execute(() -> experienceService.distillAndStore(sessionId, q, fullAnswer, false));
+            executor.execute(() -> {
+                experienceService.distillAndStore(sessionId, q, fullAnswer, false);
+                conversationSummaryService.rollupIfNeeded(sessionId);
+                episodicMemoryService.archiveTurn(sessionId, q, fullAnswer);
+            });
             
             return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(fullAnswer)));
 
@@ -135,6 +150,7 @@ public class ChatController {
 
             if (chatMemoryService.exists(request.getId())) {
                 chatMemoryService.clear(request.getId());
+                conversationSummaryService.clear(request.getId());
                 return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
             } else {
                 return ResponseEntity.ok(ApiResponse.error("会话不存在"));
@@ -189,8 +205,9 @@ public class ChatController {
                 // 三层过滤召回相关历史经验，注入提示词
                 String experienceBlock = experienceService.recallForPrompt(request.getQuestion());
 
-                // 构建系统提示词（经验 + 历史消息）
-                String systemPrompt = chatService.buildSystemPrompt(history, experienceBlock);
+                // 构建系统提示词（经验 + 早期对话滚动摘要）；窗口内历史走原生多轮 messages
+                String summary = conversationSummaryService.getSummary(sessionId);
+                String systemPrompt = chatService.buildSystemPrompt(summary, experienceBlock);
                 
                 // 创建 ReactAgent
                 ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
@@ -198,8 +215,9 @@ public class ChatController {
                 // 用于累积完整答案
                 StringBuilder fullAnswerBuilder = new StringBuilder();
                 
-                // 使用 agent.stream() 进行流式对话
-                Flux<NodeOutput> stream = agent.stream(request.getQuestion());
+                // 使用 agent.stream() 进行流式对话（历史 + 当前问题以原生多轮消息传入）
+                List<Message> messages = chatService.buildMessages(history, request.getQuestion());
+                Flux<NodeOutput> stream = agent.stream(messages);
                 
                 stream.subscribe(
                     output -> {
@@ -262,9 +280,13 @@ public class ChatController {
                             logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
                                 sessionId, chatMemoryService.getPairCount(sessionId));
 
-                            // 异步分级提炼经验，不阻塞响应
-                            executor.execute(() -> experienceService.distillAndStore(
-                                    sessionId, request.getQuestion(), fullAnswer, false));
+                            // 异步：分级提炼经验 + 滚动摘要 + 情景记忆归档，不阻塞响应
+                            executor.execute(() -> {
+                                experienceService.distillAndStore(
+                                        sessionId, request.getQuestion(), fullAnswer, false);
+                                conversationSummaryService.rollupIfNeeded(sessionId);
+                                episodicMemoryService.archiveTurn(sessionId, request.getQuestion(), fullAnswer);
+                            });
                             
                             // 发送完成标记
                             emitter.send(SseEmitter.event()

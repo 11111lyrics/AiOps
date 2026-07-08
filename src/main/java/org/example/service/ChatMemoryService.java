@@ -62,6 +62,38 @@ public class ChatMemoryService {
     }
 
     /**
+     * 获取会话当前最大 seq，无消息返回 0。
+     */
+    public int getMaxSeq(String sessionId) {
+        if (sessionId == null || sessionId.isEmpty()) {
+            return 0;
+        }
+        Integer maxSeq = jdbcTemplate.queryForObject(
+                "SELECT COALESCE(MAX(seq), 0) FROM chat_message WHERE session_id = ?",
+                Integer.class, sessionId);
+        return maxSeq == null ? 0 : maxSeq;
+    }
+
+    /**
+     * 获取 seq 在 (fromSeqExclusive, toSeqInclusive] 区间内的消息，按 seq 正序。
+     * 供滚动摘要读取"已滑出窗口且尚未被摘要覆盖"的消息。
+     */
+    public List<Map<String, String>> getMessagesBetween(String sessionId, int fromSeqExclusive, int toSeqInclusive) {
+        if (sessionId == null || sessionId.isEmpty() || toSeqInclusive <= fromSeqExclusive) {
+            return new ArrayList<>();
+        }
+        return jdbcTemplate.query(
+                "SELECT role, content FROM chat_message WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq ASC",
+                (rs, rowNum) -> {
+                    Map<String, String> msg = new HashMap<>();
+                    msg.put("role", rs.getString("role"));
+                    msg.put("content", rs.getString("content"));
+                    return msg;
+                },
+                sessionId, fromSeqExclusive, toSeqInclusive);
+    }
+
+    /**
      * 追加一对消息（用户问题 + AI 回复），seq 自增保证顺序。
      */
     @Transactional

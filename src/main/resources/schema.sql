@@ -13,6 +13,15 @@ CREATE TABLE IF NOT EXISTS chat_message (
     KEY idx_session (session_id, seq)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='对话历史消息';
 
+-- 会话滚动摘要：超出窗口的旧消息由 LLM 压缩为摘要，last_seq 为已被摘要覆盖的最大消息 seq
+CREATE TABLE IF NOT EXISTS chat_session_summary (
+    session_id  VARCHAR(64)  NOT NULL,
+    summary     TEXT         NOT NULL,
+    last_seq    INT          NOT NULL DEFAULT 0,
+    update_time DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (session_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话滚动摘要';
+
 -- 长期经验的可变元数据（向量与不可变内容存于 Milvus，按 exp_id 关联）
 CREATE TABLE IF NOT EXISTS experience_meta (
     exp_id        VARCHAR(64) NOT NULL,
