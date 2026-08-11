@@ -8,6 +8,7 @@ import com.alibaba.dashscope.common.Role;
 import com.alibaba.dashscope.utils.Constants;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import io.milvus.grpc.MutationResult;
@@ -15,6 +16,7 @@ import io.milvus.client.MilvusServiceClient;
 import io.milvus.param.R;
 import io.milvus.param.RpcStatus;
 import io.milvus.param.collection.LoadCollectionParam;
+import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
 import org.example.agent.tool.QueryMetricsTools;
 import org.example.constant.MilvusConstants;
@@ -27,7 +29,6 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PostConstruct;
 import java.sql.Timestamp;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -71,14 +72,27 @@ public class ExperienceService {
     @Value("${experience.recall.min-score:0.6}")
     private double minScore;
 
+    /** recency 半衰期（天）：经验距上次使用每过一个半衰期，时间因子衰减一半 */
+    @Value("${experience.recall.recency.half-life-days:14}")
+    private double recencyHalfLifeDays;
+
+    /** recency 因子下限：避免老经验被时间因子完全压死 */
+    @Value("${experience.recall.recency.floor:0.3}")
+    private double recencyFloor;
+
     @Value("${experience.distill.min-confidence:0.6}")
     private double minConfidence;
 
     @Value("${experience.distill.new-pattern-threshold:0.5}")
     private double newPatternThreshold;
 
-    @Value("${experience.temp.ttl-days:365}")
-    private int tempTtlDays;
+    /** 与已有经验相似度达到该阈值时，合并更新已有经验而非新增 */
+    @Value("${experience.distill.update-threshold:0.85}")
+    private double updateThreshold;
+
+    /** 弱触发经验的初始置信度折扣系数（在提炼置信度基础上打折，使其召回排序自然靠后） */
+    @Value("${experience.weak.initial-factor:0.7}")
+    private double weakInitialFactor;
 
     @Value("${experience.model:qwen-turbo}")
     private String model;
@@ -134,7 +148,16 @@ public class ExperienceService {
             }
 
             String vectorText = buildVectorText(node);
-            boolean newPattern = isNewPattern(vectorText);
+            TopMatch top = findTopMatch(vectorText);
+            boolean newPattern = top == null || top.cosScore < newPatternThreshold;
+
+            // 高相似 + 已闭环（或人工标记）：合并更新已有经验，而非新增一条近似重复
+            if (top != null && top.cosScore >= updateThreshold && (resolved || manualMark)) {
+                mergeAndUpdate(top.expId, top.content, json, confidence);
+                logger.info("[更新] 与已有经验高度相似(cos={})，已合并更新 - expId={}",
+                        String.format("%.2f", top.cosScore), top.expId);
+                return;
+            }
 
             // 避免沉淀：未解决且非新模式且非人工标记
             if (!manualMark && !resolved && !newPattern) {
@@ -147,12 +170,16 @@ public class ExperienceService {
 
             String expId = UUID.randomUUID().toString();
             if ("strong".equals(tier)) {
-                storeStrong(expId, vectorText, json, node, confidence, tier);
+                storeToLongTerm(expId, vectorText, json, node, confidence, "strong");
                 logger.info("[强触发] 经验已沉淀至 Milvus - expId={}, newPattern={}, metricConfirmed={}",
                         expId, newPattern, metricConfirmed);
             } else {
-                storeWeak(expId, sessionId, json, node, confidence);
-                logger.info("[弱触发] 经验已存入临时库(TTL {}天) - expId={}", tempTtlDays, expId);
+                // 弱触发同样入 Milvus 参与召回，但置信度打折、tier=weak；
+                // 评分成功后可晋升为 strong，长期低置信则被衰减归档自动遗忘
+                double weakConfidence = confidence * weakInitialFactor;
+                storeToLongTerm(expId, vectorText, json, node, weakConfidence, "weak");
+                logger.info("[弱触发] 经验已沉淀至 Milvus(tier=weak, confidence={}) - expId={}",
+                        String.format("%.2f", weakConfidence), expId);
             }
         } catch (Exception e) {
             logger.warn("经验提炼/沉淀失败（不影响主流程）- session={}: {}", sessionId, e.getMessage());
@@ -170,30 +197,19 @@ public class ExperienceService {
     }
 
     /**
-     * 强触发：向量+不可变经验入 Milvus，可变元数据入 MySQL experience_meta。
+     * 沉淀到长期库：向量+不可变经验入 Milvus（metadata 带 tier），可变元数据入 MySQL experience_meta。
+     * strong 与 weak 共用此路径，差别仅在 tier 标签与初始置信度；
+     * weak 经验由此获得召回资格（排序自然靠后），并可经评分反馈晋升为 strong。
      */
-    private void storeStrong(String expId, String vectorText, String fullJson, JsonNode node,
-                             double confidence, String tier) throws Exception {
+    private void storeToLongTerm(String expId, String vectorText, String fullJson, JsonNode node,
+                                 double confidence, String tier) throws Exception {
         List<Float> vector = embeddingService.generateEmbedding(vectorText);
-        insertToMilvus(expId, fullJson, vector, node);
+        insertToMilvus(expId, fullJson, vector, node, tier);
 
         jdbcTemplate.update(
                 "INSERT INTO experience_meta (exp_id, confidence, use_count, success_count, tier, created_at) " +
                         "VALUES (?, ?, 0, 0, ?, NOW())",
                 expId, confidence, tier);
-    }
-
-    /**
-     * 弱触发：存入 MySQL 临时表，带 TTL。
-     */
-    private void storeWeak(String expId, String sessionId, String fullJson, JsonNode node, double confidence) {
-        String symptoms = node.path("symptoms").toString();
-        String environment = node.path("environment").toString();
-        Timestamp expireAt = Timestamp.valueOf(LocalDateTime.now().plusDays(tempTtlDays));
-        jdbcTemplate.update(
-                "INSERT INTO experience_temp (exp_id, session_id, content, symptoms, environment, confidence, expire_at) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                expId, sessionId, fullJson, symptoms, environment, confidence, expireAt);
     }
 
     /**
@@ -242,6 +258,48 @@ public class ExperienceService {
         return extractJson(content);
     }
 
+    // ==================== Agent 主动记忆 ====================
+
+    /**
+     * Agent 主动保存一条记忆（saveMemory 工具入口）。
+     * 与已有经验高度相似时走合并更新，否则作为新经验直接入长期库。
+     *
+     * @param title   记忆标题
+     * @param content 要记住的内容（结论/规则/排障要点）
+     * @return 保存成功返回 expId，失败或功能关闭返回 null
+     */
+    public String saveAgentMemory(String title, String content) {
+        if (!enabled || content == null || content.isBlank()) {
+            return null;
+        }
+        try {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("title", title == null || title.isBlank() ? content.substring(0, Math.min(30, content.length())) : title);
+            node.put("note", content);
+            node.put("source", "agent");
+            node.put("confidence", 0.7);
+            node.put("resolved", true);
+            String json = objectMapper.writeValueAsString(node);
+            String vectorText = node.path("title").asText("") + "\n" + content;
+
+            // 与已有经验高度相似 → 合并更新，避免重复记忆
+            TopMatch top = findTopMatch(vectorText);
+            if (top != null && top.cosScore >= updateThreshold) {
+                mergeAndUpdate(top.expId, top.content, json, 0.7);
+                logger.info("[Agent记忆] 与已有经验相似，已合并更新 - expId={}", top.expId);
+                return top.expId;
+            }
+
+            String expId = UUID.randomUUID().toString();
+            storeToLongTerm(expId, vectorText, json, node, 0.7, "strong");
+            logger.info("[Agent记忆] 已主动保存 - expId={}, title={}", expId, node.path("title").asText());
+            return expId;
+        } catch (Exception e) {
+            logger.warn("Agent 主动保存记忆失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
     // ==================== 经验复用（三层过滤召回） ====================
 
     /**
@@ -265,7 +323,8 @@ public class ExperienceService {
         sb.append("--- 相关历史经验（仅供参考，必须结合当前证据验证后再采纳，禁止直接照搬执行）---\n");
         int idx = 1;
         for (RecalledExperience exp : experiences) {
-            sb.append(String.format("【候选经验%d｜可信度%.2f】%s\n", idx++, exp.getFinalScore(), exp.getContent()));
+            String tierTag = "weak".equals(exp.getTier()) ? "｜待验证" : "";
+            sb.append(String.format("【候选经验%d｜可信度%.2f%s】%s\n", idx++, exp.getFinalScore(), tierTag, exp.getContent()));
         }
         sb.append("--- 历史经验结束 ---\n\n");
         return sb.toString();
@@ -298,14 +357,17 @@ public class ExperienceService {
                 if (!environmentMatches(c.getContent(), envHint)) {
                     continue;
                 }
-                // L3：结合置信度的最终排序分
-                double confidence = loadConfidence(c.getId());
+                // L3：相似度 × 置信度 × 时间新近因子（近期用过/沉淀的经验权重更高）
+                ExperienceMeta meta = loadMeta(c.getId());
+                double recency = recencyFactor(meta.refTime);
                 RecalledExperience re = new RecalledExperience();
                 re.setExpId(c.getId());
                 re.setContent(c.getContent());
                 re.setSimScore(cosScore);
-                re.setConfidence(confidence);
-                re.setFinalScore(cosScore * confidence);
+                re.setConfidence(meta.confidence);
+                re.setTier(meta.tier);
+                re.setRecencyFactor(recency);
+                re.setFinalScore(cosScore * meta.confidence * recency);
                 result.add(re);
             }
 
@@ -348,21 +410,110 @@ public class ExperienceService {
     // ==================== 工具方法 ====================
 
     /**
-     * 与已有经验比对，判断是否为新根因模式（最高相似度低于阈值视为新模式）。
+     * 查找与给定文本最相似的已有经验（top-1），集合为空或搜索失败返回 null。
+     * 同时服务于"新模式判定"（相似度 < newPatternThreshold）与"合并更新判定"（相似度 >= updateThreshold）。
      */
-    private boolean isNewPattern(String vectorText) {
+    private TopMatch findTopMatch(String vectorText) {
         try {
             List<VectorSearchService.SearchResult> existing =
                     vectorSearchService.searchSimilarDocuments(vectorText, 1,
                             MilvusConstants.EXPERIENCE_COLLECTION_NAME);
             if (existing.isEmpty()) {
-                return true;
+                return null;
             }
-            double cosScore = 1.0 - (existing.get(0).getScore() / 2.0);
-            return cosScore < newPatternThreshold;
+            VectorSearchService.SearchResult best = existing.get(0);
+            TopMatch match = new TopMatch();
+            match.expId = best.getId();
+            match.content = best.getContent();
+            match.cosScore = 1.0 - (best.getScore() / 2.0);
+            return match;
         } catch (Exception e) {
-            // 集合为空或搜索失败时，视为新模式
-            return true;
+            // 集合为空或搜索失败时，视为无匹配（走新模式路径）
+            return null;
+        }
+    }
+
+    /**
+     * 合并更新已有经验：LLM 将旧经验与新提炼结果合并为一份，原地替换 Milvus 中的内容
+     * （同 expId 删除后重插，向量随之刷新），生命周期元数据（使用计数等）保留。
+     */
+    private void mergeAndUpdate(String expId, String oldContent, String newJson, double newConfidence) {
+        try {
+            String merged = callLlmMerge(oldContent, newJson);
+            if (merged == null || merged.isBlank()) {
+                logger.warn("经验合并 LLM 输出为空，保留旧经验不更新 - expId={}", expId);
+                return;
+            }
+            JsonNode mergedNode = objectMapper.readTree(merged);
+            String vectorText = buildVectorText(mergedNode);
+            List<Float> vector = embeddingService.generateEmbedding(vectorText);
+
+            deleteFromMilvus(expId);
+            insertToMilvus(expId, merged, vector, mergedNode, loadMeta(expId).tier);
+
+            // 元数据保留使用计数，置信度取新旧较大值并刷新使用时间；无记录则补插
+            int rows = jdbcTemplate.update(
+                    "UPDATE experience_meta SET confidence = GREATEST(confidence, ?), last_used = NOW() WHERE exp_id = ?",
+                    newConfidence, expId);
+            if (rows == 0) {
+                jdbcTemplate.update(
+                        "INSERT INTO experience_meta (exp_id, confidence, use_count, success_count, tier, created_at) " +
+                                "VALUES (?, ?, 0, 0, 'strong', NOW())",
+                        expId, newConfidence);
+            }
+        } catch (Exception e) {
+            logger.warn("经验合并更新失败（保留旧经验）- expId={}: {}", expId, e.getMessage());
+        }
+    }
+
+    /**
+     * 调用 LLM 合并同一根因模式的新旧两条经验。
+     */
+    private String callLlmMerge(String oldJson, String newJson) throws Exception {
+        String sys = """
+                你是 SRE 经验库维护器。下面是同一根因模式的两条结构化经验：一条是库中已有的旧经验，一条是刚提炼的新经验。
+                请把两者合并为一条更完整、更准确的经验。仅输出一个 JSON 对象，不要任何额外文字或代码块标记。
+                合并规则：
+                1. 保持与旧经验相同的 JSON 字段结构（title/symptoms/environment/signals/root_cause/solution/verification/risk/confidence/reusable_scope/resolved/transient/alert_name 等）；
+                2. 症状、信号、方案、验证手段取并集并去重，新信息补充进来，过时或被新经验推翻的内容以新经验为准；
+                3. root_cause 若两者一致则保留，若新经验更具体则采用新表述；
+                4. confidence 取两者中较高值；
+                5. 不要编造两条经验中都不存在的内容。
+                """;
+        String user = "【库中已有经验】\n" + safe(oldJson) + "\n\n【新提炼经验】\n" + safe(newJson);
+
+        GenerationParam param = GenerationParam.builder()
+                .apiKey(apiKey)
+                .model(model)
+                .resultFormat("message")
+                .messages(List.of(
+                        Message.builder().role(Role.SYSTEM.getValue()).content(sys).build(),
+                        Message.builder().role(Role.USER.getValue()).content(user).build()))
+                .build();
+
+        GenerationResult result = generation.call(param);
+        if (result == null || result.getOutput() == null
+                || result.getOutput().getChoices() == null
+                || result.getOutput().getChoices().isEmpty()) {
+            return null;
+        }
+        return extractJson(result.getOutput().getChoices().get(0).getMessage().getContent());
+    }
+
+    /**
+     * 从 Milvus 经验集合删除指定经验（用于合并更新时的原地替换）。
+     */
+    private void deleteFromMilvus(String expId) {
+        milvusClient.loadCollection(LoadCollectionParam.newBuilder()
+                .withCollectionName(MilvusConstants.EXPERIENCE_COLLECTION_NAME)
+                .build());
+        String expr = String.format("id == \"%s\"", expId);
+        R<MutationResult> resp = milvusClient.delete(DeleteParam.newBuilder()
+                .withCollectionName(MilvusConstants.EXPERIENCE_COLLECTION_NAME)
+                .withExpr(expr)
+                .build());
+        if (resp.getStatus() != 0) {
+            throw new RuntimeException("从 Milvus 删除旧经验失败: " + resp.getMessage());
         }
     }
 
@@ -406,7 +557,7 @@ public class ExperienceService {
     /**
      * 插入经验到 Milvus 经验集合。
      */
-    private void insertToMilvus(String expId, String fullJson, List<Float> vector, JsonNode node) throws Exception {
+    private void insertToMilvus(String expId, String fullJson, List<Float> vector, JsonNode node, String tier) throws Exception {
         R<RpcStatus> loadResponse = milvusClient.loadCollection(
                 LoadCollectionParam.newBuilder()
                         .withCollectionName(MilvusConstants.EXPERIENCE_COLLECTION_NAME)
@@ -422,7 +573,7 @@ public class ExperienceService {
 
         JsonObject metadata = new JsonObject();
         metadata.addProperty("_type", "experience");
-        metadata.addProperty("tier", "strong");
+        metadata.addProperty("tier", tier);
         metadata.addProperty("create_time", System.currentTimeMillis());
         metadata.add("environment", gson.toJsonTree(jsonToString(node.path("environment"))));
         metadata.add("reusable_scope", gson.toJsonTree(jsonToString(node.path("reusable_scope"))));
@@ -445,18 +596,41 @@ public class ExperienceService {
     }
 
     /**
-     * 读取经验置信度（无元数据时默认 0.6）。
+     * 读取经验元数据：置信度 + recency 参考时间（优先 last_used，其次 created_at）。
+     * 无记录或查询失败时返回默认值（置信度 0.6、无参考时间即 recency 中性）。
      */
-    private double loadConfidence(String expId) {
+    private ExperienceMeta loadMeta(String expId) {
+        ExperienceMeta meta = new ExperienceMeta();
         try {
-            Double c = jdbcTemplate.query(
-                    "SELECT confidence FROM experience_meta WHERE exp_id = ?",
-                    rs -> rs.next() ? rs.getDouble("confidence") : null,
+            jdbcTemplate.query(
+                    "SELECT confidence, tier, COALESCE(last_used, created_at) AS ref_time " +
+                            "FROM experience_meta WHERE exp_id = ?",
+                    rs -> {
+                        meta.confidence = rs.getDouble("confidence");
+                        meta.tier = rs.getString("tier");
+                        meta.refTime = rs.getTimestamp("ref_time");
+                    },
                     expId);
-            return c == null ? 0.6 : c;
         } catch (Exception e) {
-            return 0.6;
+            logger.debug("读取经验元数据失败 expId={}: {}", expId, e.getMessage());
         }
+        return meta;
+    }
+
+    /**
+     * 时间新近因子：按半衰期指数衰减，收敛到 floor 下限。
+     * factor = floor + (1 - floor) * 0.5^(距上次使用天数 / 半衰期)
+     */
+    private double recencyFactor(Timestamp refTime) {
+        if (refTime == null) {
+            return 1.0;
+        }
+        double days = (System.currentTimeMillis() - refTime.getTime()) / 86_400_000.0;
+        if (days <= 0) {
+            return 1.0;
+        }
+        double decay = Math.pow(0.5, days / recencyHalfLifeDays);
+        return recencyFloor + (1.0 - recencyFloor) * decay;
     }
 
     /**
@@ -506,17 +680,41 @@ public class ExperienceService {
         private String content;
         private double simScore;
         private double confidence;
+        private String tier;
+        private double recencyFactor;
         private double finalScore;
 
         public String getExpId() { return expId; }
         public void setExpId(String expId) { this.expId = expId; }
+        public String getTier() { return tier; }
+        public void setTier(String tier) { this.tier = tier; }
         public String getContent() { return content; }
         public void setContent(String content) { this.content = content; }
         public double getSimScore() { return simScore; }
         public void setSimScore(double simScore) { this.simScore = simScore; }
         public double getConfidence() { return confidence; }
         public void setConfidence(double confidence) { this.confidence = confidence; }
+        public double getRecencyFactor() { return recencyFactor; }
+        public void setRecencyFactor(double recencyFactor) { this.recencyFactor = recencyFactor; }
         public double getFinalScore() { return finalScore; }
         public void setFinalScore(double finalScore) { this.finalScore = finalScore; }
+    }
+
+    /**
+     * 已有经验的 top-1 相似匹配。
+     */
+    private static class TopMatch {
+        String expId;
+        String content;
+        double cosScore;
+    }
+
+    /**
+     * 经验元数据（置信度 + tier + recency 参考时间）。
+     */
+    private static class ExperienceMeta {
+        double confidence = 0.6;
+        String tier = "strong";
+        Timestamp refTime;
     }
 }

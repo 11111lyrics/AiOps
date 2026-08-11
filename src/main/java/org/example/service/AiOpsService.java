@@ -5,6 +5,8 @@ import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.agent.flow.agent.SupervisorAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.config.ClsProperties;
 import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
@@ -18,6 +20,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -43,6 +46,8 @@ public class AiOpsService {
 
     @Autowired
     private ClsProperties clsProperties;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
      * 执行 AI Ops 告警分析流程
@@ -91,7 +96,9 @@ public class AiOpsService {
     }
 
     /**
-     * 从执行结果中提取最终报告文本
+     * 从执行结果中提取最终报告文本。
+     * 提取链：planner_plan 的 Markdown 报告 → planner_plan 为 JSON 时尝试其中的报告字段
+     * → 兜底扫描整个编排状态中最像报告的文本输出。
      *
      * @param state 执行状态
      * @return 报告文本（如果存在）
@@ -99,19 +106,91 @@ public class AiOpsService {
     public Optional<String> extractFinalReport(OverAllState state) {
         logger.info("开始提取最终报告...");
 
-        // 提取 Planner 最终输出（包含完整的告警分析报告）
+        // 1. 首选：Planner 最终输出（预期为 Markdown 格式报告）
         Optional<AssistantMessage> plannerFinalOutput = state.value("planner_plan")
                 .filter(AssistantMessage.class::isInstance)
                 .map(AssistantMessage.class::cast);
 
         if (plannerFinalOutput.isPresent()) {
-            String reportText = plannerFinalOutput.get().getText();
-            logger.info("成功提取到 Planner 最终报告，长度: {}", reportText.length());
-            return Optional.of(reportText);
+            String text = plannerFinalOutput.get().getText();
+            if (text != null && !text.isBlank()) {
+                if (!looksLikeJson(text)) {
+                    logger.info("成功提取到 Planner 最终报告，长度: {}", text.length());
+                    return Optional.of(text);
+                }
+                // 2. Planner 输出仍是 JSON（未按 FINISH 模板输出 Markdown）：尝试提取其中的报告字段
+                Optional<String> fromJson = extractReportFromJson(text);
+                if (fromJson.isPresent()) {
+                    logger.info("Planner 输出为 JSON，已从报告字段中提取，长度: {}", fromJson.get().length());
+                    return fromJson;
+                }
+                logger.warn("Planner 输出为 JSON 计划而非报告，尝试兜底扫描编排状态");
+            }
+        }
+
+        // 3. 兜底：扫描编排状态中其他 key 的文本输出，取最像报告的一段
+        Optional<String> fallback = scanStateForReport(state);
+        if (fallback.isPresent()) {
+            logger.info("已从编排状态兜底提取报告，长度: {}", fallback.get().length());
         } else {
-            logger.warn("未能提取到 Planner 最终报告");
+            logger.warn("未能提取到最终报告（含兜底扫描）");
+        }
+        return fallback;
+    }
+
+    private boolean looksLikeJson(String text) {
+        String trimmed = text.trim();
+        return trimmed.startsWith("{") || trimmed.startsWith("```json");
+    }
+
+    /**
+     * 从 JSON 输出中尝试提取报告正文（模型偶尔会以 {"finalReport": "..."} 形式返回）。
+     */
+    private Optional<String> extractReportFromJson(String text) {
+        try {
+            String trimmed = text.trim();
+            int start = trimmed.indexOf('{');
+            int end = trimmed.lastIndexOf('}');
+            if (start < 0 || end <= start) {
+                return Optional.empty();
+            }
+            JsonNode node = objectMapper.readTree(trimmed.substring(start, end + 1));
+            for (String field : new String[]{"finalReport", "final_report", "report", "content"}) {
+                String value = node.path(field).asText("");
+                if (!value.isBlank() && value.length() > 100) {
+                    return Optional.of(value);
+                }
+            }
+            return Optional.empty();
+        } catch (Exception e) {
             return Optional.empty();
         }
+    }
+
+    /**
+     * 扫描编排状态所有值，寻找最像最终报告的文本：
+     * 优先包含"告警分析报告"标题的输出，否则取长度最大且达到下限的文本。
+     */
+    private Optional<String> scanStateForReport(OverAllState state) {
+        String best = null;
+        for (Map.Entry<String, Object> entry : state.data().entrySet()) {
+            String text = null;
+            if (entry.getValue() instanceof AssistantMessage msg) {
+                text = msg.getText();
+            } else if (entry.getValue() instanceof String s) {
+                text = s;
+            }
+            if (text == null || text.isBlank() || looksLikeJson(text)) {
+                continue;
+            }
+            if (text.contains("告警分析报告") || text.contains("告警处理详情")) {
+                return Optional.of(text);
+            }
+            if (text.length() >= 300 && (best == null || text.length() > best.length())) {
+                best = text;
+            }
+        }
+        return Optional.ofNullable(best);
     }
 
     /**

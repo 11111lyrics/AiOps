@@ -460,6 +460,13 @@ class SuperBizAgentApp {
         this.chatHistories = this.chatHistories.filter(h => h.id !== historyId);
         this.saveChatHistories();
         this.renderChatHistory();
+
+        // 同步后端：清空该会话的服务端历史与滚动摘要（尽力而为，失败不影响前端删除）
+        fetch(`${this.apiBaseUrl}/chat/clear`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ Id: historyId })
+        }).catch(() => {});
         
         // 如果删除的是当前对话，清空当前对话
         if (this.sessionId === historyId) {

@@ -6,6 +6,7 @@ import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import org.example.config.ClsProperties;
+import org.example.agent.tool.AgentMemoryTools;
 import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.EpisodicMemoryTools;
 import org.example.agent.tool.InternalDocsTools;
@@ -46,6 +47,9 @@ public class ChatService {
 
     @Autowired
     private EpisodicMemoryTools episodicMemoryTools;
+
+    @Autowired
+    private AgentMemoryTools agentMemoryTools;
 
     @Autowired(required = false)  // Mock 模式下才注册，所以设置为 optional,真实环境通过mcp配置注入
     private QueryLogsTools queryLogsTools;
@@ -111,6 +115,8 @@ public class ChatService {
         systemPromptBuilder.append("当用户需要查询公司内部文档、流程、最佳实践或技术指南时，使用 queryInternalDocs 工具。\n");
         systemPromptBuilder.append("当用户需要查询 Prometheus 告警、监控指标或系统告警状态时，使用 queryPrometheusAlerts 工具。\n");
         systemPromptBuilder.append("当用户提及\"之前/上次/以前\"处理过的问题，或需要回忆更早的历史会话内容时，使用 searchPastConversations 工具检索历史对话记录。\n");
+        systemPromptBuilder.append("当用户明确要求你\"记住\"某个结论/规则，或你在对话中确认了一条重要的可复用经验（如排障规律、环境事实、运维约定）时，使用 saveMemory 工具主动保存到长期记忆；不要保存寒暄或未经验证的猜测。\n");
+        systemPromptBuilder.append("当自动注入的历史经验不足、你需要主动查找更多长期记忆（历史排障经验、已保存的规则）时，使用 searchMemory 工具。\n");
         systemPromptBuilder.append("当用户需要查询腾讯云日志（CLS）时，使用 MCP 提供的 CLS 工具，推荐调用顺序：\n");
         systemPromptBuilder.append("1. GetTopicInfoByName：按名称查找日志主题，获取 TopicId（Region 默认 ap-chengdu）\n");
         systemPromptBuilder.append("2. TextToSearchLogQuery：将自然语言转为 CQL 查询语句（务必在 SearchLog 前调用）\n");
@@ -173,10 +179,10 @@ public class ChatService {
     public Object[] buildMethodToolsArray() {
         if (queryLogsTools != null) {
             // Mock 模式：包含 QueryLogsTools
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, episodicMemoryTools, queryLogsTools};
+            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, episodicMemoryTools, agentMemoryTools, queryLogsTools};
         } else {
             // 真实模式：不包含 QueryLogsTools（由 MCP 提供日志查询功能）
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, episodicMemoryTools};
+            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, episodicMemoryTools, agentMemoryTools};
         }
     }
 

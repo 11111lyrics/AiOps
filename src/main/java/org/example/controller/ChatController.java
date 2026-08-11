@@ -128,7 +128,7 @@ public class ChatController {
                 episodicMemoryService.archiveTurn(sessionId, q, fullAnswer);
             });
             
-            return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(fullAnswer)));
+            return ResponseEntity.ok(ApiResponse.success(ChatResponse.success(fullAnswer, sessionId)));
 
         } catch (Exception e) {
             logger.error("对话失败", e);
@@ -288,10 +288,10 @@ public class ChatController {
                                 episodicMemoryService.archiveTurn(sessionId, request.getQuestion(), fullAnswer);
                             });
                             
-                            // 发送完成标记
+                            // 发送完成标记（data 携带服务端实际使用的 sessionId，便于客户端续接会话）
                             emitter.send(SseEmitter.event()
                                     .name("message")
-                                    .data(SseMessage.done(), MediaType.APPLICATION_JSON));
+                                    .data(SseMessage.done(sessionId), MediaType.APPLICATION_JSON));
                             emitter.complete();
                         } catch (IOException e) {
                             logger.error("发送完成消息失败", e);
@@ -358,6 +358,8 @@ public class ChatController {
                         aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks, experienceBlock);
 
                 if (overAllStateOptional.isEmpty()) {
+                    // 闭环负反馈：编排走完但没有产出有效结果，本次采纳的召回经验未起效，下调置信度
+                    executor.execute(() -> experienceLifecycleService.feedbackBatch(recalledExpIds, false));
                     emitter.send(SseEmitter.event().name("message")
                             .data(SseMessage.error("多 Agent 编排未获取到有效结果"), MediaType.APPLICATION_JSON));
                     emitter.complete();
@@ -407,6 +409,8 @@ public class ChatController {
                     });
                 } else {
                     logger.warn("未能提取到 Planner 最终报告");
+                    // 闭环负反馈：流程完成但未产出可用报告，对本次采纳的召回经验回写失败评分
+                    executor.execute(() -> experienceLifecycleService.feedbackBatch(recalledExpIds, false));
                     emitter.send(SseEmitter.event().name("message")
                             .data(SseMessage.content("⚠️ 多 Agent 流程已完成，但未能生成最终报告。"), MediaType.APPLICATION_JSON));
                 }
@@ -517,11 +521,14 @@ public class ChatController {
         private boolean success;
         private String answer;
         private String errorMessage;
+        /** 服务端实际使用的会话 ID（客户端未传 Id 时由服务端生成，回传以便续接会话） */
+        private String sessionId;
 
-        public static ChatResponse success(String answer) {
+        public static ChatResponse success(String answer, String sessionId) {
             ChatResponse response = new ChatResponse();
             response.setSuccess(true);
             response.setAnswer(answer);
+            response.setSessionId(sessionId);
             return response;
         }
 
@@ -558,9 +565,16 @@ public class ChatController {
         }
 
         public static SseMessage done() {
+            return done(null);
+        }
+
+        /**
+         * 完成标记，data 可携带服务端实际使用的 sessionId。
+         */
+        public static SseMessage done(String sessionId) {
             SseMessage message = new SseMessage();
             message.setType("done");
-            message.setData(null);
+            message.setData(sessionId);
             return message;
         }
     }

@@ -15,7 +15,7 @@ server:
 file:
   upload:
     path: ./uploads
-    allowed-extensions: txt,md,pdf,doc,docx
+    allowed-extensions: txt,md,markdown,pdf,doc,docx
 
 milvus:
   host: 192.168.150.101          # Milvus 所在主机 IP（本机 Docker 填 localhost）
@@ -26,6 +26,11 @@ milvus:
   timeout: 10000
 
 spring:
+  # 文件上传大小上限（与前端 50MB 限制对齐，Spring Boot 默认仅 1MB）
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
   datasource:
     url: jdbc:mysql://192.168.150.101:3306/superbiz_agent?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&createDatabaseIfNotExist=true
     username: root
@@ -144,11 +149,20 @@ experience:
   recall:
     top-k: 5
     min-score: 0.6
+    # 时间新近因子：finalScore = 相似度 × 置信度 × recency
+    recency:
+      half-life-days: 14   # 距上次使用每过 14 天，时间因子衰减一半
+      floor: 0.3           # 因子下限，老经验不会被完全压死
   distill:
     min-confidence: 0.6
     new-pattern-threshold: 0.5
+    update-threshold: 0.85 # 与已有经验相似度达到该值时合并更新而非新增
   temp:
-    ttl-days: 365
+    ttl-days: 365          # 仅用于清理 experience_temp 存量数据（弱经验现已直接入 Milvus）
+  # 弱触发经验：入 Milvus 参与召回（tier=weak、置信度打折），评分成功后晋升 strong
+  weak:
+    initial-factor: 0.7    # 弱经验初始置信度 = 提炼置信度 × 该系数
+    promote-confidence: 0.7 # 置信度达到该值后 weak 晋升为 strong
   decay:
     cron: "0 0 3 * * *"
     idle-days: 30

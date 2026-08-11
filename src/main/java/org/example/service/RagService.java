@@ -24,6 +24,12 @@ import java.util.Map;
 /**
  * RAG (Retrieval-Augmented Generation) 服务
  * 结合向量检索和大语言模型生成答案
+ *
+ * <p><b>注意：当前未接入任何入口（死代码，保留备用）。</b>
+ * 本类是 Agent 架构引入前的独立 RAG 问答方案（检索 → 拼上下文 → LLM 流式生成，支持多轮 history），
+ * 但没有任何 Controller 引用，实际知识库问答走的是 ReactAgent + {@code queryInternalDocs} 工具路径
+ * （见 {@link org.example.agent.tool.InternalDocsTools} → {@link RetrievalService}）。
+ * 若未来需要"不经 Agent 的纯 RAG 问答接口"（如低成本、低延迟场景），可将本类接入新 Controller 复用。
  */
 @Service
 public class RagService {

@@ -43,6 +43,10 @@ public class ExperienceLifecycleService {
     @Value("${experience.decay.factor:0.95}")
     private double decayFactor;
 
+    /** 弱经验晋升阈值：评分反馈使置信度达到该值后，tier 由 weak 升为 strong */
+    @Value("${experience.weak.promote-confidence:0.7}")
+    private double promoteConfidence;
+
     /**
      * 评分反馈：成功复用 → 置信度上调、success_count+1；失败 → 置信度下调。
      *
@@ -60,6 +64,14 @@ public class ExperienceLifecycleService {
                     "UPDATE experience_meta SET confidence = LEAST(1.0, confidence + ?), " +
                             "success_count = success_count + 1, last_used = NOW() WHERE exp_id = ?",
                     UP_STEP, expId);
+            // 弱经验晋升：成功复用使置信度达到阈值后升级为 strong
+            int promoted = jdbcTemplate.update(
+                    "UPDATE experience_meta SET tier = 'strong' " +
+                            "WHERE exp_id = ? AND tier = 'weak' AND confidence >= ?",
+                    expId, promoteConfidence);
+            if (promoted > 0) {
+                logger.info("弱经验已晋升为 strong - expId={}", expId);
+            }
         } else {
             rows = jdbcTemplate.update(
                     "UPDATE experience_meta SET confidence = GREATEST(0.0, confidence - ?), " +
