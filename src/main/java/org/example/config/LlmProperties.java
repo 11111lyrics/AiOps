@@ -57,8 +57,10 @@ public class LlmProperties {
     public static class Deepseek {
         private String apiKey = "";
         private String baseUrl = "https://api.deepseek.com";
-        /** 工具调用用 deepseek-chat，不用 reasoner */
-        private String chatModel = "deepseek-chat";
+        /** V4 Flash 非思考模式，对应已停用的 deepseek-chat；思考模式用 thinking=true */
+        private String chatModel = "deepseek-v4-flash";
+        /** false=非思考（默认，利于工具调用）；true=思考模式 */
+        private boolean thinking = false;
 
         public String getApiKey() {
             return apiKey;
@@ -82,6 +84,14 @@ public class LlmProperties {
 
         public void setChatModel(String chatModel) {
             this.chatModel = chatModel;
+        }
+
+        public boolean isThinking() {
+            return thinking;
+        }
+
+        public void setThinking(boolean thinking) {
+            this.thinking = thinking;
         }
     }
 }

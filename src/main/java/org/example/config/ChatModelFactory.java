@@ -13,6 +13,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
+import java.util.HashMap;
+import java.util.Map;
+
 /**
  * 按供应商创建 Spring AI {@link ChatModel}，供对话、AI Ops、经验提炼、滚动摘要共用。
  */
@@ -35,8 +38,8 @@ public class ChatModelFactory {
 
     public ChatModel create(String provider, double temperature, int maxTokens, double topP) {
         String resolved = resolveProvider(provider);
-        logger.info("创建 ChatModel - provider={}, model={}, temperature={}, maxTokens={}",
-                resolved, modelName(resolved), temperature, maxTokens);
+        logger.info("创建 ChatModel - provider={}, model={}, thinking={}, temperature={}, maxTokens={}",
+                resolved, modelName(resolved), thinkingEnabled(resolved), temperature, maxTokens);
         if (PROVIDER_DEEPSEEK.equals(resolved)) {
             return createDeepSeek(temperature, maxTokens, topP);
         }
@@ -45,7 +48,7 @@ public class ChatModelFactory {
 
     /** 经验提炼固定使用 DeepSeek */
     public ChatModel createForDistill() {
-        return create(PROVIDER_DEEPSEEK, 0.2, 2000, 0.9);
+        return create(PROVIDER_DEEPSEEK, 0.2, 4000, 0.9);
     }
 
     public String resolveProvider(String provider) {
@@ -60,6 +63,10 @@ public class ChatModelFactory {
             return llmProperties.getDeepseek().getChatModel();
         }
         return llmProperties.getDashscope().getChatModel();
+    }
+
+    private boolean thinkingEnabled(String resolved) {
+        return PROVIDER_DEEPSEEK.equals(resolved) && llmProperties.getDeepseek().isThinking();
     }
 
     private String normalize(String provider) {
@@ -101,6 +108,9 @@ public class ChatModelFactory {
                 .baseUrl(baseUrl)
                 .apiKey(apiKey)
                 .build();
+        String thinkingType = llmProperties.getDeepseek().isThinking() ? "enabled" : "disabled";
+        Map<String, Object> extraBody = new HashMap<>();
+        extraBody.put("thinking", Map.of("type", thinkingType));
         return OpenAiChatModel.builder()
                 .openAiApi(openAiApi)
                 .defaultOptions(OpenAiChatOptions.builder()
@@ -108,6 +118,7 @@ public class ChatModelFactory {
                         .temperature(temperature)
                         .maxTokens(maxTokens)
                         .topP(topP)
+                        .extraBody(extraBody)
                         .build())
                 .build();
     }

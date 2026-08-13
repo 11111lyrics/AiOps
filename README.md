@@ -12,13 +12,15 @@
 ### 2. AIOps 智能运维
 基于 AI Agent 的自动化运维系统，采用 Planner-Executor-Replanner 架构，实现告警分析、日志查询、智能诊断和报告生成。
 
+与 **tjxt** 平台形成运维闭环：Prometheus 感知服务与中间件异常并触发告警，LogListener 将 tjxt 微服务 `spring.log` 上报至腾讯云 CLS；SuperBizAgent 联动读取活跃告警、检索 CLS 日志与运维知识库，自动完成根因分析与处置建议输出。
+
 ### 3. 记忆系统
 分层记忆体系：短期记忆（原生多轮消息 + 滚动摘要）、情景记忆（历史会话向量归档、跨会话检索）、经验沉淀（分级触发、recency 加权召回、合并更新、弱经验晋升、置信度衰减遗忘），并支持 Agent 主动读写长期记忆。
 
 ## 🚀 核心特性
 
 - ✅ **RAG 问答**: 向量检索 + 重排 + 多轮对话 + 流式输出
-- ✅ **AIOps 运维**: 智能诊断 + 多 Agent 协作 + 自动报告 + 经验评分闭环
+- ✅ **AIOps 运维**: 与 tjxt 告警/日志联动 + 多 Agent 根因分析 + 自动报告 + 经验评分闭环
 - ✅ **记忆系统**: 滚动摘要 + 情景记忆 + 经验沉淀复用 + Agent 主动记忆（saveMemory/searchMemory）
 - ✅ **工具集成**: 文档检索、告警查询、日志分析（MCP/CLS）、历史会话检索、时间工具
 - ✅ **会话管理**: MySQL 持久化、上下文维护、前后端删除同步
@@ -61,9 +63,11 @@ SuperBizAgent/
 │   │   ├── QueryMetricsTools.java     # 告警查询
 │   │   ├── QueryLogsTools.java        # 日志查询（Mock 模式）
 │   │   ├── EpisodicMemoryTools.java   # 历史会话检索（searchPastConversations）
-│   │   └── AgentMemoryTools.java      # 主动记忆读写（saveMemory/searchMemory）
+│   │   ├── AgentMemoryTools.java      # 主动记忆读写（saveMemory/searchMemory）
+│   │   └── SkillTools.java            # 按需加载项目 Skill（listSkills / loadSkill）
 │   └── config/                        # 配置类
 ├── src/main/resources/
+│   ├── skills/                        # Agent Skill 手册（cls-log-query 等）
 │   ├── static/                        # Web 界面
 │   ├── schema.sql                     # MySQL 建表（启动自动执行）
 │   └── application.yml                # 应用配置

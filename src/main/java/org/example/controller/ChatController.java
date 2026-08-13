@@ -238,16 +238,13 @@ public class ChatController {
                                                 .name("message")
                                                 .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
                                         
-                                        logger.info("发送流式内容: {}", chunk);
+                                        logger.debug("流式增量: {}", chunk);
                                     }
                                 } else if (type == OutputType.AGENT_MODEL_FINISHED) {
-                                    // 模型推理完成
-                                    logger.info("模型输出完成");
+                                    logger.debug("模型输出完成");
                                 } else if (type == OutputType.AGENT_TOOL_FINISHED) {
-                                    // 工具调用完成
                                     logger.info("工具调用完成: {}", output.node());
                                 } else if (type == OutputType.AGENT_HOOK_FINISHED) {
-                                    // Hook 执行完成
                                     logger.debug("Hook 执行完成: {}", output.node());
                                 }
                             }

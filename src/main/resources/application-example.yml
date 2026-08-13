@@ -93,7 +93,8 @@ llm:
   deepseek:
     api-key: ${DEEPSEEK_API_KEY:}          # DeepSeek API Key
     base-url: https://api.deepseek.com
-    chat-model: deepseek-chat
+    chat-model: deepseek-v4-flash
+    thinking: false                  # 非思考（原 deepseek-chat）；true 为思考模式（原 deepseek-reasoner）
 
 dashscope:
   api:
@@ -181,4 +182,4 @@ experience:
     cron: "0 0 3 * * *"
     idle-days: 30
     factor: 0.95
-  # 经验提炼固定使用 llm.deepseek（deepseek-chat），不再读取本项
+  # 经验提炼固定使用 llm.deepseek（deepseek-v4-flash 非思考），不再读取本项

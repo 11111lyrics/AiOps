@@ -11,8 +11,7 @@ import org.springframework.stereotype.Component;
 import java.io.File;
 
 /**
- * 启动时自动将 aiops-docs 目录下的文档导入到 Milvus 向量数据库
- * 解决切换 Milvus 实例后需要重新导入文档的问题
+ * 启动时扫描 aiops-docs：仅将尚未入库的新增文档切片写入 Milvus，已有文件跳过。
  */
 @Component
 public class AiopsDocsInitializer implements ApplicationRunner {
@@ -54,9 +53,10 @@ public class AiopsDocsInitializer implements ApplicationRunner {
 
             if (result.isSuccess()) {
                 logger.info("========================================");
-                logger.info("✅ aiops-docs 自动导入完成");
+                logger.info("✅ aiops-docs 自动导入完成（仅新增文件切片）");
                 logger.info("   总文件数: {}", result.getTotalFiles());
-                logger.info("   成功: {}", result.getSuccessCount());
+                logger.info("   新增: {}", result.getSuccessCount());
+                logger.info("   跳过(已入库): {}", result.getSkipCount());
                 logger.info("   失败: {}", result.getFailCount());
                 logger.info("   耗时: {} ms", result.getDurationMs());
                 logger.info("========================================");
@@ -64,7 +64,8 @@ public class AiopsDocsInitializer implements ApplicationRunner {
                 logger.warn("========================================");
                 logger.warn("⚠️  aiops-docs 自动导入部分失败");
                 logger.warn("   总文件数: {}", result.getTotalFiles());
-                logger.warn("   成功: {}", result.getSuccessCount());
+                logger.warn("   新增: {}", result.getSuccessCount());
+                logger.warn("   跳过(已入库): {}", result.getSkipCount());
                 logger.warn("   失败: {}", result.getFailCount());
                 if (result.getErrorMessage() != null) {
                     logger.warn("   错误信息: {}", result.getErrorMessage());

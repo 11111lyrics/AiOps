@@ -6,11 +6,11 @@ import com.alibaba.cloud.ai.graph.agent.flow.agent.SupervisorAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.example.config.ClsProperties;
 import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
 import org.example.agent.tool.QueryLogsTools;
 import org.example.agent.tool.QueryMetricsTools;
+import org.example.agent.tool.SkillTools;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -45,7 +45,7 @@ public class AiOpsService {
     private QueryLogsTools queryLogsTools;
 
     @Autowired
-    private ClsProperties clsProperties;
+    private SkillTools skillTools;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -230,10 +230,10 @@ public class AiOpsService {
     private Object[] buildMethodToolsArray() {
         if (queryLogsTools != null) {
             // Mock 模式：包含 QueryLogsTools
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, queryLogsTools};
+            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, skillTools, queryLogsTools};
         } else {
             // 真实模式：不包含 QueryLogsTools（由 MCP 提供日志查询功能）
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools};
+            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, skillTools};
         }
     }
 
@@ -246,22 +246,9 @@ public class AiOpsService {
                 1. 读取当前输入任务 {input} 以及 Executor 的最近反馈 {executor_feedback}。
                 2. 分析 Prometheus 告警、日志、内部文档等信息，制定可执行的下一步步骤。
                 3. 在执行阶段，输出 JSON，包含 decision (PLAN|EXECUTE|FINISH)、step 描述、预期要调用的工具、以及必要的上下文。
-                4. 调用任何腾讯云日志/主题相关工具时，Region 参数必须使用连字符格式（如 ap-chengdu），若不确定请省略以使用默认值。
+                4. 需要查询腾讯云 CLS 日志时，先调用 loadSkill（name=cls-log-query），再按 skill 中的顺序使用 MCP 工具；禁止凭记忆编造调用顺序。Region 不确定时省略以使用默认值。
                 5. 严格禁止编造数据，只能引用工具返回的真实内容；如果连续 3 次调用同一工具仍失败或返回空结果，需停止该方向并在最终报告的结论部分说明"无法完成"的原因。
 
-                ## 腾讯云 CLS 日志工具（MCP 提供，按此顺序调用）
-                - GetTopicInfoByName：按名称查找日志主题，获取 TopicId
-                - TextToSearchLogQuery：将自然语言转为 CQL（SearchLog 前必须调用）
-                - SearchLog：执行日志检索（From/To 为毫秒时间戳，建议近 15 分钟）
-                - DescribeLogContext：查看日志上下文
-                - DescribeAlarms / DescribeAlertRecordHistory / GetAlarmLog：告警查询
-                - ConvertTimeStringToTimestamp / ConvertTimestampToTimeString：时间转换
-                禁止使用已下线的 queryLogs / getAvailableLogTopics 本地工具。
-
-                """
-                + clsProperties.buildTopicsPromptBlock()
-                + """
-                
                 ## 最终报告输出要求（CRITICAL）
                 
                 当 decision=FINISH 时，你必须：
@@ -353,17 +340,11 @@ public class AiOpsService {
     private String buildExecutorPrompt() {
         return """
                 你是 Executor Agent，负责读取 Planner 最新输出 {planner_plan}，只执行其中的第一步。
-                - 确认步骤所需的工具与参数，尤其是 Region 参数要使用连字符格式（ap-chengdu）；若 Planner 未给出则使用默认区域。
-                - 查询 CLS 日志时按顺序调用：GetTopicInfoByName → TextToSearchLogQuery → SearchLog；需要上下文时用 DescribeLogContext。
-                - 根据告警中的服务名，从上文 CLS 日志主题清单选择对应 TopicId 或主题名（如 gateway-service → tjxt-dev-gateway-service-log-ap-chengdu）。
-                - 查询告警历史用 DescribeAlarms / DescribeAlertRecordHistory / GetAlarmLog；禁止使用 queryLogs 等本地 Mock 工具。
+                - 确认步骤所需的工具与参数；Region 未给出时使用默认区域。
+                - 查询 CLS 日志前必须先调用 loadSkill（name=cls-log-query），再严格按 skill 中的 MCP 顺序执行；禁止使用 queryLogs 等本地 Mock 工具，禁止编造日志。
                 - 调用相应的工具并收集结果，如工具返回错误或空数据，需要将失败原因、请求参数一并记录，并停止进一步调用该工具（同一工具失败达到 3 次时应直接返回 FAILED）。
                 - 将日志、指标、文档等证据整理成结构化摘要，标注对应的告警名称或资源，方便 Planner 填充"告警根因分析 / 处理方案执行"章节。
                 - 以 JSON 形式返回执行状态、证据以及给 Planner 的建议，写入 executor_feedback，严禁编造未实际查询到的内容。
-
-                """
-                + clsProperties.buildTopicsPromptBlock()
-                + """
 
                 输出示例：
                 {
@@ -386,12 +367,10 @@ public class AiOpsService {
                 3. 根据 executor_agent 的反馈，评估是否需要再次调用 planner_agent，直到 decision=FINISH。
                 4. FINISH 后，确保向最终用户输出完整的《告警分析报告》，格式必须严格为：
                    告警分析报告\n---\n# 告警处理详情\n## 活跃告警清单\n## 告警根因分析N\n## 处理方案执行N\n## 结论。
-                5. 若步骤涉及腾讯云 CLS 日志，确保 Executor 使用 MCP 工具（GetTopicInfoByName、TextToSearchLogQuery、SearchLog 等），Region 使用连字符格式（ap-chengdu），并按服务选择正确日志主题。
+                5. 若步骤涉及腾讯云 CLS 日志，确保 Executor 先 loadSkill（name=cls-log-query）再查日志，不要凭记忆跳过 skill。
                 6. 如果发现 Planner/Executor 在同一方向连续 3 次调用工具仍失败或没有数据，必须终止流程，直接输出"任务无法完成"的报告，明确告知失败原因，严禁凭空编造结果。
 
                 只允许在 planner_agent、executor_agent 与 FINISH 之间做出选择。
-
-                """
-                + clsProperties.buildTopicsPromptBlock();
+                """;
     }
 }

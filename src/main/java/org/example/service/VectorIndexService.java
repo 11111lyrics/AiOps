@@ -2,11 +2,14 @@ package org.example.service;
 
 import io.milvus.client.MilvusServiceClient;
 import io.milvus.grpc.MutationResult;
+import io.milvus.grpc.QueryResults;
 import io.milvus.param.R;
 import io.milvus.param.RpcStatus;
 import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
+import io.milvus.param.dml.QueryParam;
+import io.milvus.response.QueryResultsWrapper;
 import lombok.Getter;
 import lombok.Setter;
 import org.example.constant.MilvusConstants;
@@ -49,10 +52,10 @@ public class VectorIndexService {
     private String uploadPath;
 
     /**
-     * 索引指定目录下的所有文件
-     * 
+     * 索引指定目录下尚未入库的新文件。已在 Milvus 中存在的文件跳过，不再重新切片。
+     *
      * @param directoryPath 目录路径（可选，默认使用配置的上传目录）
-     * @return 索引结果  这里可以优化：定时重建目录下所有文件的索引
+     * @return 索引结果
      */
     public IndexingResult indexDirectory(String directoryPath) {
         IndexingResult result = new IndexingResult();
@@ -60,19 +63,18 @@ public class VectorIndexService {
 
         try {
             // 使用指定目录或默认上传目录
-            String targetPath = (directoryPath != null && !directoryPath.trim().isEmpty()) 
+            String targetPath = (directoryPath != null && !directoryPath.trim().isEmpty())
                     ? directoryPath : uploadPath;
-                    
+
             Path dirPath = Paths.get(targetPath).normalize();
             File directory = dirPath.toFile();
-            
+
             if (!directory.exists() || !directory.isDirectory()) {
                 throw new IllegalArgumentException("目录不存在或不是有效目录: " + targetPath);
             }
 
             result.setDirectoryPath(directory.getAbsolutePath());
 
-            // 获取所有支持的文件
             File[] files = directory.listFiles((dir, name) ->
                 processorRegistry.isSupportedFile(name)
             );
@@ -86,14 +88,18 @@ public class VectorIndexService {
             }
 
             result.setTotalFiles(files.length);
-            logger.info("开始索引目录: {}, 找到 {} 个文件", targetPath, files.length);
+            logger.info("开始扫描目录: {}, 共 {} 个文件（仅对尚未入库的新增文件切片）", targetPath, files.length);
 
-            // 遍历并索引每个文件
             for (File file : files) {
                 try {
+                    if (isAlreadyIndexed(file)) {
+                        result.incrementSkipCount();
+                        logger.info("跳过已入库文件（不重新切片）: {}", file.getName());
+                        continue;
+                    }
                     indexSingleFile(file.getAbsolutePath());
                     result.incrementSuccessCount();
-                    logger.info("✓ 文件索引成功: {}", file.getName());
+                    logger.info("✓ 新增文件索引成功: {}", file.getName());
                 } catch (Exception e) {
                     result.incrementFailCount();
                     result.addFailedFile(file.getAbsolutePath(), e.getMessage());
@@ -104,8 +110,8 @@ public class VectorIndexService {
             result.setSuccess(result.getFailCount() == 0);
             result.setEndTime(LocalDateTime.now());
 
-            logger.info("目录索引完成: 总数={}, 成功={}, 失败={}", 
-                result.getTotalFiles(), result.getSuccessCount(), result.getFailCount());
+            logger.info("目录索引完成: 总数={}, 新增={}, 跳过={}, 失败={}",
+                result.getTotalFiles(), result.getSuccessCount(), result.getSkipCount(), result.getFailCount());
 
             return result;
 
@@ -168,6 +174,58 @@ public class VectorIndexService {
         }
 
         logger.info("文件索引完成: {}, 共 {} 个分片", filePath, chunks.size());
+    }
+
+    /**
+     * 判断文件是否已在 Milvus 中入库。按文件名或规范化路径命中即视为已存在。
+     */
+    private boolean isAlreadyIndexed(File file) {
+        try {
+            ensureCollectionLoaded();
+
+            String fileName = escapeExprValue(file.getName());
+            String normalizedPath = escapeExprValue(
+                    Paths.get(file.getAbsolutePath()).normalize().toString().replace(File.separator, "/"));
+            String expr = String.format(
+                    "metadata[\"_file_name\"] == \"%s\" or metadata[\"_source\"] == \"%s\"",
+                    fileName, normalizedPath);
+
+            QueryParam queryParam = QueryParam.newBuilder()
+                    .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                    .withExpr(expr)
+                    .withOutFields(List.of("id"))
+                    .withLimit(1L)
+                    .build();
+
+            R<QueryResults> response = milvusClient.query(queryParam);
+            if (response.getStatus() != 0) {
+                logger.warn("查询已入库文件失败，将按新增处理: {} - {}", file.getName(), response.getMessage());
+                return false;
+            }
+
+            QueryResultsWrapper wrapper = new QueryResultsWrapper(response.getData());
+            boolean exists = !wrapper.getRowRecords().isEmpty();
+            logger.debug("文件入库检查: {}, 已存在={}", file.getName(), exists);
+            return exists;
+        } catch (Exception e) {
+            logger.warn("查询已入库文件异常，将按新增处理: {} - {}", file.getName(), e.getMessage());
+            return false;
+        }
+    }
+
+    private void ensureCollectionLoaded() {
+        R<RpcStatus> loadResponse = milvusClient.loadCollection(
+                LoadCollectionParam.newBuilder()
+                        .withCollectionName(MilvusConstants.MILVUS_COLLECTION_NAME)
+                        .build()
+        );
+        if (loadResponse.getStatus() != 0 && loadResponse.getStatus() != 65535) {
+            throw new RuntimeException("加载 collection 失败: " + loadResponse.getMessage());
+        }
+    }
+
+    private String escapeExprValue(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 
     /**
@@ -329,6 +387,7 @@ public class VectorIndexService {
         private int totalFiles;
         private int successCount;
         private int failCount;
+        private int skipCount;
         @Setter
         private LocalDateTime startTime;
         @Setter
@@ -343,6 +402,10 @@ public class VectorIndexService {
 
         public void incrementFailCount() {
             this.failCount++;
+        }
+
+        public void incrementSkipCount() {
+            this.skipCount++;
         }
 
         public long getDurationMs() {

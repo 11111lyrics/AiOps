@@ -98,6 +98,8 @@ class SuperBizAgentApp {
         this.sidebar = document.querySelector('.sidebar');
         this.newChatBtn = document.getElementById('newChatBtn');
         this.aiOpsSidebarBtn = document.getElementById('aiOpsSidebarBtn');
+        this.markValuableBtn = document.getElementById('markValuableBtn');
+        this.markValuableBar = document.getElementById('markValuableBar');
         
         // 输入区域元素
         this.messageInput = document.getElementById('messageInput');
@@ -132,6 +134,10 @@ class SuperBizAgentApp {
         if (this.aiOpsSidebarBtn) {
             this.aiOpsSidebarBtn.addEventListener('click', () => this.triggerAIOps());
         }
+
+        if (this.markValuableBtn) {
+            this.markValuableBtn.addEventListener('click', () => this.markCurrentChatValuable());
+        }
         
         // 模式选择下拉菜单
         if (this.modeSelectorBtn) {
@@ -141,15 +147,18 @@ class SuperBizAgentApp {
             });
         }
         
-        // 下拉菜单项点击
-        const dropdownItems = document.querySelectorAll('.dropdown-item');
-        dropdownItems.forEach(item => {
-            item.addEventListener('click', (e) => {
-                const provider = item.getAttribute('data-provider');
-                this.selectProvider(provider);
+        // 模型选择：事件委托，点击子节点也能取到 data-provider
+        if (this.modeDropdown) {
+            this.modeDropdown.addEventListener('click', (e) => {
+                const item = e.target.closest('.dropdown-item');
+                if (!item) {
+                    return;
+                }
+                e.stopPropagation();
+                this.selectProvider(item.getAttribute('data-provider'));
                 this.closeModeDropdown();
             });
-        });
+        }
         
         // 点击外部关闭下拉菜单
         document.addEventListener('click', (e) => {
@@ -303,6 +312,7 @@ class SuperBizAgentApp {
         const chatHistory = {
             id: this.sessionId,
             title: title,
+            titleCustom: false,
             messages: [...this.currentChatHistory],
             createdAt: new Date().toISOString(),
             updatedAt: new Date().toISOString()
@@ -318,6 +328,22 @@ class SuperBizAgentApp {
         
         // 保存到localStorage
         this.saveChatHistories();
+        this.isCurrentChatFromHistory = true;
+    }
+
+    // 将当前对话写入侧边栏：新对话首次保存，已有条目则更新
+    persistCurrentConversation() {
+        if (this.currentChatHistory.length === 0) {
+            return;
+        }
+        const exists = this.chatHistories.some(h => h.id === this.sessionId);
+        if (exists) {
+            this.updateCurrentChatHistory();
+        } else {
+            this.saveCurrentChat();
+        }
+        this.isCurrentChatFromHistory = true;
+        this.renderChatHistory();
     }
     
     // 更新当前对话的历史记录
@@ -338,12 +364,14 @@ class SuperBizAgentApp {
         history.messages = [...this.currentChatHistory];
         history.updatedAt = new Date().toISOString();
         
-        // 如果标题需要更新（第一条消息改变了）
-        const firstUserMessage = this.currentChatHistory.find(msg => msg.type === 'user');
-        if (firstUserMessage) {
-            const newTitle = firstUserMessage.content.substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '');
-            if (history.title !== newTitle) {
-                history.title = newTitle;
+        // 未手动重命名时，用第一条用户消息作为标题
+        if (!history.titleCustom) {
+            const firstUserMessage = this.currentChatHistory.find(msg => msg.type === 'user');
+            if (firstUserMessage) {
+                const newTitle = firstUserMessage.content.substring(0, 30) + (firstUserMessage.content.length > 30 ? '...' : '');
+                if (history.title !== newTitle) {
+                    history.title = newTitle;
+                }
             }
         }
         
@@ -385,25 +413,39 @@ class SuperBizAgentApp {
         
         this.chatHistories.forEach((history, index) => {
             const historyItem = document.createElement('div');
-            historyItem.className = 'history-item';
+            historyItem.className = 'history-item' + (history.id === this.sessionId ? ' active' : '');
             historyItem.dataset.historyId = history.id;
             
             historyItem.innerHTML = `
                 <div class="history-item-content">
                     <span class="history-item-title">${this.escapeHtml(history.title)}</span>
                 </div>
-                <button class="history-item-delete" data-history-id="${history.id}" title="删除">
-                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                    </svg>
-                </button>
+                <div class="history-item-actions">
+                    <button class="history-item-rename" data-history-id="${history.id}" title="重命名">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M12 20h9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                    <button class="history-item-delete" data-history-id="${history.id}" title="删除">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M18 6L6 18M6 6L18 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                </div>
             `;
             
             // 点击历史项加载对话
             historyItem.addEventListener('click', (e) => {
-                if (!e.target.closest('.history-item-delete')) {
+                if (!e.target.closest('.history-item-actions') && !e.target.closest('.history-item-rename-input')) {
                     this.loadChatHistory(history.id);
                 }
+            });
+
+            const renameBtn = historyItem.querySelector('.history-item-rename');
+            renameBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.startRenameChat(history.id, historyItem);
             });
             
             // 删除历史对话
@@ -451,6 +493,7 @@ class SuperBizAgentApp {
         // 更新UI
         this.checkAndSetCentered();
         this.renderChatHistory();
+        this.updateUI();
     }
     
     // 删除历史对话
@@ -469,11 +512,118 @@ class SuperBizAgentApp {
         // 如果删除的是当前对话，清空当前对话
         if (this.sessionId === historyId) {
             this.currentChatHistory = [];
+            this.isCurrentChatFromHistory = false;
             if (this.chatMessages) {
                 this.chatMessages.innerHTML = '';
             }
             this.sessionId = this.generateSessionId();
             this.checkAndSetCentered();
+            this.updateUI();
+        }
+    }
+
+    startRenameChat(historyId, historyItem) {
+        const history = this.chatHistories.find(h => h.id === historyId);
+        if (!history) {
+            return;
+        }
+        const titleSpan = historyItem.querySelector('.history-item-title');
+        if (!titleSpan) {
+            return;
+        }
+
+        historyItem.classList.add('renaming');
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'history-item-rename-input';
+        input.value = history.title || '';
+        input.maxLength = 40;
+
+        let finished = false;
+        const commit = () => {
+            if (finished) {
+                return;
+            }
+            finished = true;
+            const next = input.value.trim();
+            if (next) {
+                history.title = next;
+                history.titleCustom = true;
+                this.saveChatHistories();
+            }
+            this.renderChatHistory();
+        };
+        const cancel = () => {
+            if (finished) {
+                return;
+            }
+            finished = true;
+            this.renderChatHistory();
+        };
+
+        input.addEventListener('click', (e) => e.stopPropagation());
+        input.addEventListener('mousedown', (e) => e.stopPropagation());
+        input.addEventListener('keydown', (e) => {
+            e.stopPropagation();
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                commit();
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                cancel();
+            }
+        });
+        input.addEventListener('blur', commit);
+
+        titleSpan.replaceWith(input);
+        input.focus();
+        input.select();
+    }
+
+    async markCurrentChatValuable() {
+        if (this.isStreaming) {
+            this.showNotification('请等待当前对话完成后再标记', 'warning');
+            return;
+        }
+        if (this.currentChatHistory.length === 0) {
+            this.showNotification('当前对话为空，无法标记有价值', 'warning');
+            return;
+        }
+
+        this.persistCurrentConversation();
+        if (this.markValuableBtn) {
+            this.markValuableBtn.disabled = true;
+        }
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/experience/mark`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId: this.sessionId })
+            });
+            const data = await response.json();
+            if (data.code === 200 || data.message === 'success') {
+                this.showNotification(data.data || '已提交经验提炼', 'success');
+            } else {
+                this.showNotification(data.message || '标记失败', 'error');
+            }
+        } catch (error) {
+            console.error('标记有价值失败:', error);
+            this.showNotification('标记失败: ' + error.message, 'error');
+        } finally {
+            this.updateUI();
+        }
+    }
+
+    updateMarkValuableVisibility() {
+        const last = this.currentChatHistory.length > 0
+            ? this.currentChatHistory[this.currentChatHistory.length - 1]
+            : null;
+        const show = !this.isStreaming && last && last.type === 'assistant';
+        if (this.markValuableBar) {
+            this.markValuableBar.hidden = !show;
+        }
+        if (this.markValuableBtn) {
+            this.markValuableBtn.disabled = !show;
         }
     }
 
@@ -503,27 +653,39 @@ class SuperBizAgentApp {
             this.showNotification('请等待当前对话完成后再切换模型', 'warning');
             return;
         }
-        if (provider !== 'deepseek' && provider !== 'dashscope') {
+        const resolved = this.normalizeProvider(provider);
+        if (!resolved) {
+            this.showNotification('模型切换失败，请重新选择 DeepSeek 或通义千问', 'warning');
             return;
         }
-        
-        this.currentProvider = provider;
-        this.saveProvider(provider);
+
+        this.currentProvider = resolved;
+        this.saveProvider(resolved);
         this.updateUI();
-        
+
         const providerNames = {
             'deepseek': 'DeepSeek',
             'dashscope': '通义千问'
         };
-        
-        this.showNotification(`已切换到${providerNames[provider]}`, 'info');
+        this.showNotification(`已切换到${providerNames[resolved]}`, 'info');
+    }
+
+    normalizeProvider(provider) {
+        if (provider === 'deepseek' || provider === 'dashscope') {
+            return provider;
+        }
+        if (provider === 'qwen' || provider === 'aliyun' || provider === 'alibaba') {
+            return 'dashscope';
+        }
+        return null;
     }
 
     loadProvider() {
         try {
             const saved = localStorage.getItem('oncall.llm.provider');
-            if (saved === 'deepseek' || saved === 'dashscope') {
-                return saved;
+            const resolved = this.normalizeProvider(saved);
+            if (resolved) {
+                return resolved;
             }
         } catch (e) {
             console.warn('读取模型选择失败', e);
@@ -565,6 +727,11 @@ class SuperBizAgentApp {
         if (this.sendButton) {
             this.sendButton.disabled = this.isStreaming;
         }
+
+        if (this.markValuableBtn) {
+            this.markValuableBtn.disabled = this.isStreaming || this.currentChatHistory.length === 0;
+        }
+        this.updateMarkValuableVisibility();
         
         // 更新输入框状态
         if (this.messageInput) {
@@ -615,12 +782,7 @@ class SuperBizAgentApp {
         } finally {
             this.isStreaming = false;
             this.updateUI();
-            
-            // 如果当前对话是从历史记录加载的，更新历史记录
-            if (this.isCurrentChatFromHistory && this.currentChatHistory.length > 0) {
-                this.updateCurrentChatHistory();
-                this.renderChatHistory(); // 更新历史对话列表显示
-            }
+            this.persistCurrentConversation();
         }
     }
 
@@ -980,18 +1142,14 @@ class SuperBizAgentApp {
                 this.highlightCodeBlocks(messageContent);
             }
         }
-        // 保存流式消息到历史记录
+        // 保存流式消息到历史记录，并立刻出现在「近期对话」
         if (fullResponse) {
             this.currentChatHistory.push({
                 type: 'assistant',
                 content: fullResponse,
                 timestamp: new Date().toISOString()
             });
-            // 如果当前对话是从历史记录加载的，更新历史记录
-            if (this.isCurrentChatFromHistory) {
-                this.updateCurrentChatHistory();
-                this.renderChatHistory();
-            }
+            this.persistCurrentConversation();
         }
     }
 

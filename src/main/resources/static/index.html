@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>智能OnCall助手</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=20260813-6">
     <!-- Markdown 渲染库 -->
     <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
     <!-- 代码高亮库（可选） -->
@@ -41,19 +41,29 @@
 
         <!-- 主内容区域 -->
         <main class="main-content">
-            <button class="ai-ops-top-btn" id="aiOpsSidebarBtn">
-                <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                <span>AI Ops</span>
-            </button>
+            <div class="main-top-actions">
+                <button class="ai-ops-top-btn" id="aiOpsSidebarBtn">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    <span>AI Ops</span>
+                </button>
+            </div>
             <div class="chat-container">
                 <div class="welcome-greeting" id="welcomeGreeting">
                     <p>你好！我是智能Oncall小助手</p>
                 </div>
                 <div class="chat-messages" id="chatMessages">
+                </div>
+                <div class="mark-valuable-bar" id="markValuableBar" hidden>
+                    <button class="mark-valuable-btn" id="markValuableBtn" title="标记当前对话有价值，强制提炼经验">
+                        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+                        </svg>
+                        <span>有价值</span>
+                    </button>
                 </div>
                 
                 <div class="chat-input-container">
@@ -92,7 +102,7 @@
                                                 <div class="dropdown-item-main">
                                                     <span>DeepSeek</span>
                                                 </div>
-                                                <div class="dropdown-item-sub">deepseek-chat</div>
+                                                <div class="dropdown-item-sub">deepseek-v4-flash</div>
                                             </div>
                                             <div class="dropdown-item" data-provider="dashscope">
                                                 <div class="dropdown-item-main">
@@ -126,6 +136,6 @@
         </div>
     </div>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=20260813-6"></script>
 </body>
 </html>

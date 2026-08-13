@@ -48,7 +48,7 @@ public class ConversationSummaryService {
 
     @PostConstruct
     public void init() {
-        logger.info("会话摘要服务初始化完成, enabled={}, model=deepseek-chat, maxChars={}", enabled, maxChars);
+        logger.info("会话摘要服务初始化完成, enabled={}, model=deepseek-v4-flash, maxChars={}", enabled, maxChars);
     }
 
     /**
@@ -142,7 +142,7 @@ public class ConversationSummaryService {
             user.append(role).append(": ").append(msg.get("content")).append("\n");
         }
 
-        logger.info("滚动摘要调用 LLM - provider=deepseek, model=deepseek-chat");
+        logger.info("滚动摘要调用 LLM - provider=deepseek, model=deepseek-v4-flash");
         ChatModel chatModel = chatModelFactory.create(ChatModelFactory.PROVIDER_DEEPSEEK, 0.2, 1500, 0.9);
         ChatResponse response = chatModel.call(new Prompt(List.of(
                 new SystemMessage(sys),

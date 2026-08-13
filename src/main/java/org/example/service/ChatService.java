@@ -2,13 +2,13 @@ package org.example.service;
 
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.exception.GraphRunnerException;
-import org.example.config.ClsProperties;
 import org.example.agent.tool.AgentMemoryTools;
 import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.EpisodicMemoryTools;
 import org.example.agent.tool.InternalDocsTools;
 import org.example.agent.tool.QueryLogsTools;
 import org.example.agent.tool.QueryMetricsTools;
+import org.example.agent.tool.SkillTools;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -48,14 +48,14 @@ public class ChatService {
     @Autowired
     private AgentMemoryTools agentMemoryTools;
 
+    @Autowired
+    private SkillTools skillTools;
+
     @Autowired(required = false)  // Mock 模式下才注册，所以设置为 optional,真实环境通过mcp配置注入
     private QueryLogsTools queryLogsTools;
 
     @Autowired
     private ToolCallbackProvider tools;
-
-    @Autowired
-    private ClsProperties clsProperties;
 
     /**
      * 构建系统提示词。
@@ -77,15 +77,7 @@ public class ChatService {
         systemPromptBuilder.append("当用户提及\"之前/上次/以前\"处理过的问题，或需要回忆更早的历史会话内容时，使用 searchPastConversations 工具检索历史对话记录。\n");
         systemPromptBuilder.append("当用户明确要求你\"记住\"某个结论/规则，或你在对话中确认了一条重要的可复用经验（如排障规律、环境事实、运维约定）时，使用 saveMemory 工具主动保存到长期记忆；不要保存寒暄或未经验证的猜测。\n");
         systemPromptBuilder.append("当自动注入的历史经验不足、你需要主动查找更多长期记忆（历史排障经验、已保存的规则）时，使用 searchMemory 工具。\n");
-        systemPromptBuilder.append("当用户需要查询腾讯云日志（CLS）时，使用 MCP 提供的 CLS 工具，推荐调用顺序：\n");
-        systemPromptBuilder.append("1. GetTopicInfoByName：按名称查找日志主题，获取 TopicId（Region 默认 ap-chengdu）\n");
-        systemPromptBuilder.append("2. TextToSearchLogQuery：将自然语言转为 CQL 查询语句（务必在 SearchLog 前调用）\n");
-        systemPromptBuilder.append("3. SearchLog：执行日志检索（From/To 为毫秒时间戳，默认查近 15 分钟）\n");
-        systemPromptBuilder.append("4. DescribeLogContext：查看某条日志的前后上下文（需 PkgId、PkgLogId、Time）\n");
-        systemPromptBuilder.append("告警相关可使用 DescribeAlarms、DescribeAlertRecordHistory、GetAlarmLog。\n");
-        systemPromptBuilder.append("时间转换使用 ConvertTimeStringToTimestamp / ConvertTimestampToTimeString。\n");
-        systemPromptBuilder.append("Region 参数必须使用连字符格式（如 ap-chengdu），禁止编造日志内容。\n\n");
-        systemPromptBuilder.append(clsProperties.buildTopicsPromptBlock());
+        systemPromptBuilder.append("当需要查询腾讯云 CLS 日志时，先调用 loadSkill，name 为 cls-log-query，严格按返回的顺序使用 MCP 工具；禁止凭记忆编造调用顺序或日志内容。不确定有哪些 skill 时先调用 listSkills。\n\n");
 
         // 注入召回的历史经验（仅供参考，必须验证）
         if (experienceBlock != null && !experienceBlock.isBlank()) {
@@ -139,10 +131,10 @@ public class ChatService {
     public Object[] buildMethodToolsArray() {
         if (queryLogsTools != null) {
             // Mock 模式：包含 QueryLogsTools
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, episodicMemoryTools, agentMemoryTools, queryLogsTools};
+            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, episodicMemoryTools, agentMemoryTools, skillTools, queryLogsTools};
         } else {
             // 真实模式：不包含 QueryLogsTools（由 MCP 提供日志查询功能）
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, episodicMemoryTools, agentMemoryTools};
+            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, episodicMemoryTools, agentMemoryTools, skillTools};
         }
     }
 

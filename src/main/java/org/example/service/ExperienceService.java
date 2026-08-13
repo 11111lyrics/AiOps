@@ -99,7 +99,7 @@ public class ExperienceService {
 
     @PostConstruct
     public void init() {
-        logger.info("经验服务初始化完成, enabled={}, distillModel=deepseek-chat, recallTopK={}", enabled, recallTopK);
+        logger.info("经验服务初始化完成, enabled={}, distillModel=deepseek-v4-flash, recallTopK={}", enabled, recallTopK);
     }
 
     public boolean isEnabled() {
@@ -120,6 +120,10 @@ public class ExperienceService {
         if (!enabled) {
             return;
         }
+        if (!manualMark && !looksLikeOpsTroubleshooting(question, answer)) {
+            logger.info("非运维排障对话，跳过经验提炼 - session={}", sessionId);
+            return;
+        }
         try {
             String json = callLlmDistill(question, answer);
             if (json == null || json.isBlank()) {
@@ -127,7 +131,14 @@ public class ExperienceService {
                 return;
             }
 
-            JsonNode node = objectMapper.readTree(json);
+            JsonNode node;
+            try {
+                node = objectMapper.readTree(json);
+            } catch (Exception parseEx) {
+                logger.warn("经验 JSON 解析失败，已跳过 - session={}, preview={}",
+                        sessionId, preview(json, 400));
+                return;
+            }
             double confidence = node.path("confidence").asDouble(0.0);
             String rootCause = node.path("root_cause").asText("");
             boolean resolved = node.path("resolved").asBoolean(false);
@@ -176,6 +187,30 @@ public class ExperienceService {
         } catch (Exception e) {
             logger.warn("经验提炼/沉淀失败（不影响主流程）- session={}: {}", sessionId, e.getMessage());
         }
+    }
+
+    /**
+     * 调用 LLM 前的廉价预检：闲聊/问答不提炼。
+     * 人工标记与 AI Ops 报告不走此过滤。
+     */
+    private boolean looksLikeOpsTroubleshooting(String question, String answer) {
+        String text = (safe(question) + "\n" + safe(answer)).toLowerCase();
+        if (text.contains("自动告警分析") || text.contains("告警分析报告")) {
+            return true;
+        }
+        String[] signals = {
+                "告警", "故障", "异常", "报错", "排查", "根因", "宕机", "挂了",
+                "超时", "延迟", "不可用", "重启", "熔断", "限流", "雪崩",
+                "error", "exception", "timeout", "oom", "gc", "cpu", "内存", "磁盘",
+                "mysql", "redis", "rabbit", "prometheus", "cls", "spring.log",
+                "502", "503", "连接拒绝", "健康检查", "指标"
+        };
+        for (String signal : signals) {
+            if (text.contains(signal)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -228,8 +263,9 @@ public class ExperienceService {
                   "alert_name": "若与某告警相关则填其名称，否则留空"
                 }
                 说明：confidence 取 0~1；resolved 表示问题是否已闭环解决；transient 表示是否为瞬时异常/误报。
+                约束：每个数组最多 5 项，单项不超过 80 字；不要粘贴原始日志或超长路径；必须输出完整可解析的 JSON。
                 """;
-        String user = "【用户问题】\n" + safe(question) + "\n\n【AI 回复】\n" + safe(answer);
+        String user = "【用户问题】\n" + clip(question, 1500) + "\n\n【AI 回复】\n" + clip(answer, 3000);
         return callDeepSeekJson(sys, user);
     }
 
@@ -461,7 +497,7 @@ public class ExperienceService {
 
     /** 经验提炼 / 合并固定走 DeepSeek，不跟随前端模型切换。 */
     private String callDeepSeekJson(String sys, String user) {
-        logger.info("经验提炼/合并调用 LLM - provider=deepseek, model=deepseek-chat");
+        logger.info("经验提炼/合并调用 LLM - provider=deepseek, model=deepseek-v4-flash");
         ChatModel chatModel = chatModelFactory.createForDistill();
         ChatResponse response = chatModel.call(new Prompt(List.of(
                 new SystemMessage(sys),
@@ -469,7 +505,12 @@ public class ExperienceService {
         if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
             return null;
         }
-        return extractJson(response.getResult().getOutput().getText());
+        String raw = response.getResult().getOutput().getText();
+        String json = extractJson(raw);
+        if (json == null) {
+            logger.warn("经验提炼输出不是完整 JSON，已跳过。原文预览: {}", preview(raw, 400));
+        }
+        return json;
     }
 
     /**
@@ -626,8 +667,24 @@ public class ExperienceService {
         return s == null ? "" : s;
     }
 
+    private String clip(String s, int maxChars) {
+        String text = safe(s).trim();
+        if (text.length() <= maxChars) {
+            return text;
+        }
+        return text.substring(0, maxChars) + "\n…(已截断)";
+    }
+
+    private String preview(String s, int maxChars) {
+        String text = safe(s).replaceAll("\\s+", " ").trim();
+        if (text.length() <= maxChars) {
+            return text;
+        }
+        return text.substring(0, maxChars) + "...";
+    }
+
     /**
-     * 从模型输出中提取 JSON（去除可能的 ```json 包裹）。
+     * 从模型输出中提取第一个括号配对完整的 JSON 对象。截断或不完整则返回 null。
      */
     private String extractJson(String content) {
         if (content == null) {
@@ -635,9 +692,34 @@ public class ExperienceService {
         }
         String text = content.trim();
         int start = text.indexOf('{');
-        int end = text.lastIndexOf('}');
-        if (start >= 0 && end > start) {
-            return text.substring(start, end + 1);
+        if (start < 0) {
+            return null;
+        }
+        int depth = 0;
+        boolean inString = false;
+        boolean escape = false;
+        for (int i = start; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (inString) {
+                if (escape) {
+                    escape = false;
+                } else if (c == '\\') {
+                    escape = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+            } else if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return text.substring(start, i + 1);
+                }
+            }
         }
         return null;
     }
