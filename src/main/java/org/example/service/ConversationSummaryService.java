@@ -1,12 +1,13 @@
 package org.example.service;
 
-import com.alibaba.dashscope.aigc.generation.Generation;
-import com.alibaba.dashscope.aigc.generation.GenerationParam;
-import com.alibaba.dashscope.aigc.generation.GenerationResult;
-import com.alibaba.dashscope.common.Message;
-import com.alibaba.dashscope.common.Role;
+import org.example.config.ChatModelFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -33,8 +34,8 @@ public class ConversationSummaryService {
     @Autowired
     private ChatMemoryService chatMemoryService;
 
-    @Value("${dashscope.api.key}")
-    private String apiKey;
+    @Autowired
+    private ChatModelFactory chatModelFactory;
 
     @Value("${memory.window-size:6}")
     private int windowSize;
@@ -42,18 +43,12 @@ public class ConversationSummaryService {
     @Value("${memory.summary.enabled:true}")
     private boolean enabled;
 
-    @Value("${memory.summary.model:qwen-turbo}")
-    private String model;
-
     @Value("${memory.summary.max-chars:800}")
     private int maxChars;
 
-    private Generation generation;
-
     @PostConstruct
     public void init() {
-        this.generation = new Generation();
-        logger.info("会话摘要服务初始化完成, enabled={}, model={}, maxChars={}", enabled, model, maxChars);
+        logger.info("会话摘要服务初始化完成, enabled={}, model=deepseek-chat, maxChars={}", enabled, maxChars);
     }
 
     /**
@@ -127,9 +122,9 @@ public class ConversationSummaryService {
     }
 
     /**
-     * 调用 LLM 将旧摘要与新增溢出消息合并为一份新摘要。
+     * 调用 LLM 将旧摘要与新增溢出消息合并为一份新摘要。固定 DeepSeek，不跟随前端模型切换。
      */
-    private String callLlmSummarize(String oldSummary, List<Map<String, String>> overflow) throws Exception {
+    private String callLlmSummarize(String oldSummary, List<Map<String, String>> overflow) {
         String sys = String.format("""
                 你是对话摘要器。请把"已有摘要"与"新增对话内容"合并为一份不超过 %d 字的中文摘要。
                 要求：
@@ -147,22 +142,15 @@ public class ConversationSummaryService {
             user.append(role).append(": ").append(msg.get("content")).append("\n");
         }
 
-        GenerationParam param = GenerationParam.builder()
-                .apiKey(apiKey)
-                .model(model)
-                .resultFormat("message")
-                .messages(List.of(
-                        Message.builder().role(Role.SYSTEM.getValue()).content(sys).build(),
-                        Message.builder().role(Role.USER.getValue()).content(user.toString()).build()))
-                .build();
-
-        GenerationResult result = generation.call(param);
-        if (result == null || result.getOutput() == null
-                || result.getOutput().getChoices() == null
-                || result.getOutput().getChoices().isEmpty()) {
+        logger.info("滚动摘要调用 LLM - provider=deepseek, model=deepseek-chat");
+        ChatModel chatModel = chatModelFactory.create(ChatModelFactory.PROVIDER_DEEPSEEK, 0.2, 1500, 0.9);
+        ChatResponse response = chatModel.call(new Prompt(List.of(
+                new SystemMessage(sys),
+                new UserMessage(user.toString()))));
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
             return null;
         }
-        String summary = result.getOutput().getChoices().get(0).getMessage().getContent();
+        String summary = response.getResult().getOutput().getText();
         if (summary != null && summary.length() > maxChars * 2) {
             summary = summary.substring(0, maxChars * 2);
         }

@@ -1,8 +1,5 @@
 package org.example.controller;
 
-import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
-import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.graph.NodeOutput;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
@@ -10,6 +7,7 @@ import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import lombok.Getter;
 import lombok.Setter;
+import org.example.config.ChatModelFactory;
 import org.example.service.AiOpsService;
 import org.example.service.ChatMemoryService;
 import org.example.service.ChatService;
@@ -20,6 +18,7 @@ import org.example.service.ExperienceService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -68,6 +67,9 @@ public class ChatController {
     @Autowired
     private ToolCallbackProvider tools;
 
+    @Autowired
+    private ChatModelFactory chatModelFactory;
+
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
     /**
@@ -77,7 +79,8 @@ public class ChatController {
     @PostMapping("/chat")
     public ResponseEntity<ApiResponse<ChatResponse>> chat(@RequestBody ChatRequest request) {
         try {
-            logger.info("收到对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
+            logger.info("收到对话请求 - SessionId: {}, Provider: {}, Question: {}",
+                    request.getId(), request.getProvider(), request.getQuestion());
 
             // 参数校验
             if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
@@ -92,9 +95,7 @@ public class ChatController {
             List<Map<String, String>> history = chatMemoryService.getRecentHistory(sessionId);
             logger.info("会话历史消息对数: {}", history.size() / 2);
 
-            // 创建 DashScope API 和 ChatModel
-            DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-            DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+            ChatModel chatModel = chatModelFactory.create(request.getProvider(), 0.7, 2000, 0.9);
 
             // 记录可用工具
             chatService.logAvailableTools();
@@ -184,7 +185,8 @@ public class ChatController {
 
         executor.execute(() -> {
             try {
-                logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Question: {}", request.getId(), request.getQuestion());
+                logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Provider: {}, Question: {}",
+                        request.getId(), request.getProvider(), request.getQuestion());
 
                 // 解析会话 ID（为空则新建）
                 String sessionId = resolveSessionId(request.getId());
@@ -193,9 +195,7 @@ public class ChatController {
                 List<Map<String, String>> history = chatMemoryService.getRecentHistory(sessionId);
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
-                // 创建 DashScope API 和 ChatModel
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = chatService.createStandardChatModel(dashScopeApi);
+                ChatModel chatModel = chatModelFactory.create(request.getProvider(), 0.7, 2000, 0.9);
 
                 // 记录可用工具
                 chatService.logAvailableTools();
@@ -321,23 +321,15 @@ public class ChatController {
      * 无需用户输入，自动执行告警分析流程
      */
     @PostMapping(value = "/ai_ops", produces = "text/event-stream;charset=UTF-8")
-    public SseEmitter aiOps() {
+    public SseEmitter aiOps(@RequestBody(required = false) ChatRequest request) {
         SseEmitter emitter = new SseEmitter(600000L); // 10分钟超时（告警分析可能较慢）
+        String provider = request != null ? request.getProvider() : null;
 
         executor.execute(() -> {
             try {
-                logger.info("收到 AI 智能运维请求 - 启动多 Agent 协作流程");
+                logger.info("收到 AI 智能运维请求 - provider={}, 启动多 Agent 协作流程", provider);
 
-                DashScopeApi dashScopeApi = chatService.createDashScopeApi();
-                DashScopeChatModel chatModel = DashScopeChatModel.builder()
-                        .dashScopeApi(dashScopeApi)
-                        .defaultOptions(DashScopeChatOptions.builder()
-                                .withModel(DashScopeChatModel.DEFAULT_MODEL_NAME)
-                                .withTemperature(0.3)
-                                .withMaxToken(8000)
-                                .withTopP(0.9)
-                                .build())
-                        .build();
+                ChatModel chatModel = chatModelFactory.create(provider, 0.3, 8000, 0.9);
 
                 ToolCallback[] toolCallbacks = tools.getToolCallbacks();
 
@@ -484,6 +476,10 @@ public class ChatController {
         @com.fasterxml.jackson.annotation.JsonProperty(value = "Question")
         @com.fasterxml.jackson.annotation.JsonAlias({"question", "QUESTION"})
         private String Question;
+
+        @com.fasterxml.jackson.annotation.JsonProperty(value = "Provider")
+        @com.fasterxml.jackson.annotation.JsonAlias({"provider", "PROVIDER"})
+        private String Provider;
 
     }
 

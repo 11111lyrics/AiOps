@@ -74,6 +74,11 @@
             <groupId>com.alibaba.cloud.ai</groupId>
             <artifactId>spring-ai-alibaba-starter-dashscope</artifactId>
         </dependency>
+        <!-- DeepSeek 走 OpenAI 兼容协议 -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-model-openai</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>com.alibaba.cloud.ai</groupId>

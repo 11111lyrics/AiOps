@@ -1,11 +1,5 @@
 package org.example.service;
 
-import com.alibaba.dashscope.aigc.generation.Generation;
-import com.alibaba.dashscope.aigc.generation.GenerationParam;
-import com.alibaba.dashscope.aigc.generation.GenerationResult;
-import com.alibaba.dashscope.common.Message;
-import com.alibaba.dashscope.common.Role;
-import com.alibaba.dashscope.utils.Constants;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -19,9 +13,15 @@ import io.milvus.param.collection.LoadCollectionParam;
 import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
 import org.example.agent.tool.QueryMetricsTools;
+import org.example.config.ChatModelFactory;
 import org.example.constant.MilvusConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -60,8 +60,8 @@ public class ExperienceService {
     @Autowired(required = false)
     private QueryMetricsTools queryMetricsTools;
 
-    @Value("${dashscope.api.key}")
-    private String apiKey;
+    @Autowired
+    private ChatModelFactory chatModelFactory;
 
     @Value("${experience.enabled:true}")
     private boolean enabled;
@@ -94,20 +94,12 @@ public class ExperienceService {
     @Value("${experience.weak.initial-factor:0.7}")
     private double weakInitialFactor;
 
-    @Value("${experience.model:qwen-turbo}")
-    private String model;
-
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Gson gson = new Gson();
-    private Generation generation;
 
     @PostConstruct
     public void init() {
-        if (apiKey != null && !apiKey.isEmpty()) {
-            Constants.apiKey = apiKey;
-        }
-        this.generation = new Generation();
-        logger.info("经验服务初始化完成, enabled={}, model={}, recallTopK={}", enabled, model, recallTopK);
+        logger.info("经验服务初始化完成, enabled={}, distillModel=deepseek-chat, recallTopK={}", enabled, recallTopK);
     }
 
     public boolean isEnabled() {
@@ -238,24 +230,7 @@ public class ExperienceService {
                 说明：confidence 取 0~1；resolved 表示问题是否已闭环解决；transient 表示是否为瞬时异常/误报。
                 """;
         String user = "【用户问题】\n" + safe(question) + "\n\n【AI 回复】\n" + safe(answer);
-
-        GenerationParam param = GenerationParam.builder()
-                .apiKey(apiKey)
-                .model(model)
-                .resultFormat("message")
-                .messages(List.of(
-                        Message.builder().role(Role.SYSTEM.getValue()).content(sys).build(),
-                        Message.builder().role(Role.USER.getValue()).content(user).build()))
-                .build();
-
-        GenerationResult result = generation.call(param);
-        if (result == null || result.getOutput() == null
-                || result.getOutput().getChoices() == null
-                || result.getOutput().getChoices().isEmpty()) {
-            return null;
-        }
-        String content = result.getOutput().getChoices().get(0).getMessage().getContent();
-        return extractJson(content);
+        return callDeepSeekJson(sys, user);
     }
 
     // ==================== Agent 主动记忆 ====================
@@ -481,23 +456,20 @@ public class ExperienceService {
                 5. 不要编造两条经验中都不存在的内容。
                 """;
         String user = "【库中已有经验】\n" + safe(oldJson) + "\n\n【新提炼经验】\n" + safe(newJson);
+        return callDeepSeekJson(sys, user);
+    }
 
-        GenerationParam param = GenerationParam.builder()
-                .apiKey(apiKey)
-                .model(model)
-                .resultFormat("message")
-                .messages(List.of(
-                        Message.builder().role(Role.SYSTEM.getValue()).content(sys).build(),
-                        Message.builder().role(Role.USER.getValue()).content(user).build()))
-                .build();
-
-        GenerationResult result = generation.call(param);
-        if (result == null || result.getOutput() == null
-                || result.getOutput().getChoices() == null
-                || result.getOutput().getChoices().isEmpty()) {
+    /** 经验提炼 / 合并固定走 DeepSeek，不跟随前端模型切换。 */
+    private String callDeepSeekJson(String sys, String user) {
+        logger.info("经验提炼/合并调用 LLM - provider=deepseek, model=deepseek-chat");
+        ChatModel chatModel = chatModelFactory.createForDistill();
+        ChatResponse response = chatModel.call(new Prompt(List.of(
+                new SystemMessage(sys),
+                new UserMessage(user))));
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
             return null;
         }
-        return extractJson(result.getOutput().getChoices().get(0).getMessage().getContent());
+        return extractJson(response.getResult().getOutput().getText());
     }
 
     /**

@@ -44,11 +44,17 @@ spring:
       mode: always
       continue-on-error: false
   ai:
+    # 禁止 DashScope / OpenAI 自动注册全局 ChatModel，对话与 AI Ops 由 ChatModelFactory 按 provider 创建
+    model:
+      chat: none
+    openai:
+      api-key: ${llm.deepseek.api-key:your-openai-compatible-api-key}
+      base-url: https://api.deepseek.com
     dashscope:
       api-key: your-dashscope-api-key
       chat:
         options:
-          model: qwen-turbo
+          model: qwen-plus
           timeout: 180000
       retry:
         max-attempts: 3
@@ -79,6 +85,16 @@ spring:
                 TENCENTCLOUD_SECRET_KEY: ${TENCENTCLOUD_SECRET_KEY:your-secret-key}
                 TZ: Asia/Shanghai
 
+# 对话 / AI Ops 可切换；经验提炼固定 DeepSeek。Embedding / Rerank 仍走 DashScope。
+llm:
+  default-provider: deepseek
+  dashscope:
+    chat-model: qwen-plus
+  deepseek:
+    api-key: ${DEEPSEEK_API_KEY:}          # DeepSeek API Key
+    base-url: https://api.deepseek.com
+    chat-model: deepseek-chat
+
 dashscope:
   api:
     key: your-dashscope-api-key
@@ -93,7 +109,6 @@ document:
 rag:
   top-k: 3
   recall-top-k: 10
-  model: "qwen3-max"
   rerank:
     enabled: true
     model: qwen3-rerank
@@ -101,7 +116,7 @@ rag:
 
 aiops:
   docs:
-    auto-import: false
+    auto-import: false          # true 时启动扫描目录，仅对尚未入库的新增文档切片
     path: ./aiops-docs
 
 prometheus:
@@ -133,10 +148,9 @@ cls:
 
 memory:
   window-size: 6
-  # 滚动摘要：滑出窗口的旧消息由 LLM 压缩为摘要注入 system prompt
+  # 滚动摘要：滑出窗口的旧消息由 DeepSeek 压缩为摘要注入 system prompt
   summary:
     enabled: true
-    model: qwen-turbo
     max-chars: 800
   # 情景记忆：历史问答归档进 Milvus，供 Agent 跨会话检索
   episodic:
@@ -167,4 +181,4 @@ experience:
     cron: "0 0 3 * * *"
     idle-days: 30
     factor: 0.95
-  model: qwen-turbo
+  # 经验提炼固定使用 llm.deepseek（deepseek-chat），不再读取本项

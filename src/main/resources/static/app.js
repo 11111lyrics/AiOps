@@ -2,7 +2,7 @@
 class SuperBizAgentApp {
     constructor() {
         this.apiBaseUrl = 'http://localhost:9900/api';
-        this.currentMode = 'quick'; // 'quick' 或 'stream'
+        this.currentProvider = this.loadProvider(); // 'deepseek' 或 'dashscope'
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
         this.currentChatHistory = []; // 当前对话的消息历史
@@ -145,8 +145,8 @@ class SuperBizAgentApp {
         const dropdownItems = document.querySelectorAll('.dropdown-item');
         dropdownItems.forEach(item => {
             item.addEventListener('click', (e) => {
-                const mode = item.getAttribute('data-mode');
-                this.selectMode(mode);
+                const provider = item.getAttribute('data-provider');
+                this.selectProvider(provider);
                 this.closeModeDropdown();
             });
         });
@@ -266,8 +266,6 @@ class SuperBizAgentApp {
         // 生成新的会话ID
         this.sessionId = this.generateSessionId();
         
-        // 重置模式为快速
-        this.currentMode = 'quick';
         this.updateUI();
         
         // 重新设置居中样式（确保对话框居中显示）
@@ -499,40 +497,64 @@ class SuperBizAgentApp {
         }
     }
 
-    // 选择模式
-    selectMode(mode) {
+    // 选择模型
+    selectProvider(provider) {
         if (this.isStreaming) {
-            this.showNotification('请等待当前对话完成后再切换模式', 'warning');
+            this.showNotification('请等待当前对话完成后再切换模型', 'warning');
+            return;
+        }
+        if (provider !== 'deepseek' && provider !== 'dashscope') {
             return;
         }
         
-        this.currentMode = mode;
+        this.currentProvider = provider;
+        this.saveProvider(provider);
         this.updateUI();
         
-        const modeNames = {
-            'quick': '快速',
-            'stream': '流式'
+        const providerNames = {
+            'deepseek': 'DeepSeek',
+            'dashscope': '通义千问'
         };
         
-        this.showNotification(`已切换到${modeNames[mode]}模式`, 'info');
+        this.showNotification(`已切换到${providerNames[provider]}`, 'info');
+    }
+
+    loadProvider() {
+        try {
+            const saved = localStorage.getItem('oncall.llm.provider');
+            if (saved === 'deepseek' || saved === 'dashscope') {
+                return saved;
+            }
+        } catch (e) {
+            console.warn('读取模型选择失败', e);
+        }
+        return 'deepseek';
+    }
+
+    saveProvider(provider) {
+        try {
+            localStorage.setItem('oncall.llm.provider', provider);
+        } catch (e) {
+            console.warn('保存模型选择失败', e);
+        }
     }
 
     // 更新UI
     updateUI() {
-        // 更新模式选择器显示
+        // 更新模型选择器显示
         if (this.currentModeText) {
-            const modeNames = {
-                'quick': '快速',
-                'stream': '流式'
+            const providerNames = {
+                'deepseek': 'DeepSeek',
+                'dashscope': '通义千问'
             };
-            this.currentModeText.textContent = modeNames[this.currentMode] || '快速';
+            this.currentModeText.textContent = providerNames[this.currentProvider] || 'DeepSeek';
         }
         
         // 更新下拉菜单选中状态
         const dropdownItems = document.querySelectorAll('.dropdown-item');
         dropdownItems.forEach(item => {
-            const mode = item.getAttribute('data-mode');
-            if (mode === this.currentMode) {
+            const provider = item.getAttribute('data-provider');
+            if (provider === this.currentProvider) {
                 item.classList.add('active');
             } else {
                 item.classList.remove('active');
@@ -586,11 +608,7 @@ class SuperBizAgentApp {
         this.updateUI();
 
         try {
-            if (this.currentMode === 'quick') {
-                await this.sendQuickMessage(message);
-            } else if (this.currentMode === 'stream') {
-                await this.sendStreamMessage(message);
-            }
+            await this.sendStreamMessage(message);
         } catch (error) {
             console.error('发送消息失败:', error);
             this.addMessage('assistant', '抱歉，发送消息时出现错误：' + error.message);
@@ -619,7 +637,8 @@ class SuperBizAgentApp {
                 },
                 body: JSON.stringify({
                     Id: this.sessionId,
-                    Question: message
+                    Question: message,
+                    Provider: this.currentProvider
                 })
             });
 
@@ -675,7 +694,8 @@ class SuperBizAgentApp {
                 },
                 body: JSON.stringify({
                     Id: this.sessionId,
-                    Question: message
+                    Question: message,
+                    Provider: this.currentProvider
                 })
             });
 
@@ -1113,7 +1133,10 @@ class SuperBizAgentApp {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                }
+                },
+                body: JSON.stringify({
+                    Provider: this.currentProvider
+                })
             });
 
             if (!response.ok) {
