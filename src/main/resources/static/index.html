@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>智能OnCall助手</title>
-    <link rel="stylesheet" href="styles.css?v=20260813-6">
+    <link rel="stylesheet" href="styles.css?v=20260815-1">
     <!-- Markdown 渲染库 -->
     <script src="https://cdn.jsdelivr.net/npm/marked@11.1.1/marked.min.js"></script>
     <!-- 代码高亮库（可选） -->
@@ -69,6 +69,7 @@
                 <div class="chat-input-container">
                     <div class="input-group-wrapper">
                         <div class="input-wrapper">
+                            <div class="attachment-chips" id="attachmentChips" hidden></div>
                             <input type="text" id="messageInput" placeholder="问问智能OnCall助手" maxlength="1000" class="message-input">
                             <div class="input-bottom-bar">
                                 <div class="tools-btn-wrapper">
@@ -84,7 +85,7 @@
                                             <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                                             </svg>
-                                            <span>上传文件</span>
+                                            <span>添加附件</span>
                                         </div>
                                     </div>
                                 </div>
@@ -121,7 +122,7 @@
                             </div>
                         </div>
                     </div>
-                    <input type="file" id="fileInput" accept=".txt,.md,.markdown,.pdf,.doc,.docx" style="display: none;">
+                    <input type="file" id="fileInput" accept=".txt,.md,.markdown,.pdf,.doc,.docx" multiple style="display: none;">
                 </div>
             </div>
         </main>
@@ -136,6 +137,6 @@
         </div>
     </div>
 
-    <script src="app.js?v=20260813-6"></script>
+    <script src="app.js?v=20260815-1"></script>
 </body>
 </html>

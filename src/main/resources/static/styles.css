@@ -793,6 +793,57 @@ body {
     box-shadow: 0 0 0 3px rgba(26, 115, 232, 0.1);
 }
 
+.attachment-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.attachment-chip,
+.message-attachment-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 4px 8px;
+    border: 1px solid #dadce0;
+    border-radius: 12px;
+    background: #f8f9fa;
+    color: #3c4043;
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.attachment-chip-name,
+.message-attachment-chip {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.attachment-chip-remove {
+    border: none;
+    background: none;
+    color: #5f6368;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0 2px;
+}
+
+.attachment-chip-remove:hover {
+    color: #202124;
+}
+
+.message-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+    justify-content: flex-end;
+}
+
 .input-bottom-bar {
     display: flex;
     align-items: center;

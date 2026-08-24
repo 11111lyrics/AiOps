@@ -7,8 +7,11 @@ import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import lombok.Getter;
 import lombok.Setter;
+import org.example.agent.tool.QueryMetricsTools;
 import org.example.config.ChatModelFactory;
+import org.example.dto.ChatAttachment;
 import org.example.service.AiOpsService;
+import org.example.service.ChatAttachmentService;
 import org.example.service.ChatMemoryService;
 import org.example.service.ChatService;
 import org.example.service.ConversationSummaryService;
@@ -22,9 +25,11 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.core.publisher.Flux;
 
@@ -50,6 +55,9 @@ public class ChatController {
     private ChatService chatService;
 
     @Autowired
+    private ChatAttachmentService chatAttachmentService;
+
+    @Autowired
     private ChatMemoryService chatMemoryService;
 
     @Autowired
@@ -63,6 +71,9 @@ public class ChatController {
 
     @Autowired
     private ExperienceLifecycleService experienceLifecycleService;
+
+    @Autowired
+    private QueryMetricsTools queryMetricsTools;
 
     @Autowired
     private ToolCallbackProvider tools;
@@ -79,31 +90,37 @@ public class ChatController {
     @PostMapping("/chat")
     public ResponseEntity<ApiResponse<ChatResponse>> chat(@RequestBody ChatRequest request) {
         try {
-            logger.info("收到对话请求 - SessionId: {}, Provider: {}, Question: {}",
-                    request.getId(), request.getProvider(), request.getQuestion());
+            logger.info("收到对话请求 - SessionId: {}, Provider: {}, attachments={}",
+                    request.getId(), request.getProvider(),
+                    request.getAttachmentIds() == null ? 0 : request.getAttachmentIds().size());
 
-            // 参数校验
-            if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
-                logger.warn("问题内容为空");
+            if (!hasChatInput(request)) {
+                logger.warn("问题内容为空且无附件");
                 return ResponseEntity.ok(ApiResponse.success(ChatResponse.error("问题内容不能为空")));
             }
 
             // 解析会话 ID（为空则新建）
             String sessionId = resolveSessionId(request.getId());
+            String originalQuestion = trimQuestion(request);
+            String questionForModel = chatAttachmentService.buildUserContent(
+                    sessionId, originalQuestion, request.getAttachmentIds());
 
             // 获取历史消息（从 MySQL 持久化读取最近窗口）
             List<Map<String, String>> history = chatMemoryService.getRecentHistory(sessionId);
             logger.info("会话历史消息对数: {}", history.size() / 2);
 
-            ChatModel chatModel = chatModelFactory.create(request.getProvider(), 0.7, 2000, 0.9);
+            ChatModel chatModel = chatModelFactory.create(request.getProvider(), 0.7, 8000, 0.9);
 
             // 记录可用工具
             chatService.logAvailableTools();
 
             logger.info("开始 ReactAgent 对话（支持自动工具调用）");
 
-            // 三层过滤召回相关历史经验，注入提示词
-            String experienceBlock = experienceService.recallForPrompt(request.getQuestion());
+            // 三层过滤召回相关历史经验，注入提示词（用用户原话，避免附件全文污染召回）
+            String recallQuery = originalQuestion.isEmpty() ? "附件文档" : originalQuestion;
+            List<ExperienceService.RecalledExperience> recalled =
+                    experienceService.recall(recallQuery, experienceService.extractEnvHint(recallQuery));
+            String experienceBlock = experienceService.formatExperienceBlock(recalled);
 
             // 构建系统提示词（经验 + 早期对话滚动摘要）；窗口内历史走原生多轮 messages
             String summary = conversationSummaryService.getSummary(sessionId);
@@ -113,18 +130,19 @@ public class ChatController {
             ReactAgent agent = chatService.createReactAgent(chatModel, systemPrompt);
             
             // 执行对话（历史 + 当前问题以原生多轮消息传入）
-            List<Message> messages = chatService.buildMessages(history, request.getQuestion());
+            List<Message> messages = chatService.buildMessages(history, questionForModel);
             String fullAnswer = chatService.executeChat(agent, messages);
             
-            // 更新会话历史（持久化到 MySQL）
-            chatMemoryService.appendTurn(sessionId, request.getQuestion(), fullAnswer);
+            // 更新会话历史（持久化到 MySQL，含当轮附件文本，便于后续轮次引用）
+            chatMemoryService.appendTurn(sessionId, questionForModel, fullAnswer);
             logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
                 sessionId, chatMemoryService.getPairCount(sessionId));
 
-            // 异步：分级提炼经验 + 滚动摘要 + 情景记忆归档，不阻塞响应
-            final String q = request.getQuestion();
+            // 异步：分级提炼经验 + 聊天闭环反馈 + 滚动摘要 + 情景记忆归档，不阻塞响应
+            final String q = originalQuestion.isEmpty() ? questionForModel : originalQuestion;
+            final List<ExperienceService.RecalledExperience> recalledForLoop = recalled;
             executor.execute(() -> {
-                experienceService.distillAndStore(sessionId, q, fullAnswer, false);
+                closeChatExperienceLoop(sessionId, q, fullAnswer, recalledForLoop);
                 conversationSummaryService.rollupIfNeeded(sessionId);
                 episodicMemoryService.archiveTurn(sessionId, q, fullAnswer);
             });
@@ -152,6 +170,7 @@ public class ChatController {
             if (chatMemoryService.exists(request.getId())) {
                 chatMemoryService.clear(request.getId());
                 conversationSummaryService.clear(request.getId());
+                chatAttachmentService.deleteSession(request.getId());
                 return ResponseEntity.ok(ApiResponse.success("会话历史已清空"));
             } else {
                 return ResponseEntity.ok(ApiResponse.error("会话不存在"));
@@ -171,9 +190,8 @@ public class ChatController {
     public SseEmitter chatStream(@RequestBody ChatRequest request) {
         SseEmitter emitter = new SseEmitter(300000L); // 5分钟超时
 
-        // 参数校验
-        if (request.getQuestion() == null || request.getQuestion().trim().isEmpty()) {
-            logger.warn("问题内容为空");
+        if (!hasChatInput(request)) {
+            logger.warn("问题内容为空且无附件");
             try {
                 emitter.send(SseEmitter.event().name("message").data(SseMessage.error("问题内容不能为空"), MediaType.APPLICATION_JSON));
                 emitter.complete();
@@ -185,17 +203,21 @@ public class ChatController {
 
         executor.execute(() -> {
             try {
-                logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Provider: {}, Question: {}",
-                        request.getId(), request.getProvider(), request.getQuestion());
+                logger.info("收到 ReactAgent 对话请求 - SessionId: {}, Provider: {}, attachments={}",
+                        request.getId(), request.getProvider(),
+                        request.getAttachmentIds() == null ? 0 : request.getAttachmentIds().size());
 
                 // 解析会话 ID（为空则新建）
                 String sessionId = resolveSessionId(request.getId());
+                String originalQuestion = trimQuestion(request);
+                String questionForModel = chatAttachmentService.buildUserContent(
+                        sessionId, originalQuestion, request.getAttachmentIds());
 
                 // 获取历史消息（从 MySQL 持久化读取最近窗口）
                 List<Map<String, String>> history = chatMemoryService.getRecentHistory(sessionId);
                 logger.info("ReactAgent 会话历史消息对数: {}", history.size() / 2);
 
-                ChatModel chatModel = chatModelFactory.create(request.getProvider(), 0.7, 2000, 0.9);
+                ChatModel chatModel = chatModelFactory.create(request.getProvider(), 0.7, 8000, 0.9);
 
                 // 记录可用工具
                 chatService.logAvailableTools();
@@ -203,7 +225,10 @@ public class ChatController {
                 logger.info("开始 ReactAgent 流式对话（支持自动工具调用）");
 
                 // 三层过滤召回相关历史经验，注入提示词
-                String experienceBlock = experienceService.recallForPrompt(request.getQuestion());
+                String recallQuery = originalQuestion.isEmpty() ? "附件文档" : originalQuestion;
+                List<ExperienceService.RecalledExperience> recalled =
+                        experienceService.recall(recallQuery, experienceService.extractEnvHint(recallQuery));
+                String experienceBlock = experienceService.formatExperienceBlock(recalled);
 
                 // 构建系统提示词（经验 + 早期对话滚动摘要）；窗口内历史走原生多轮 messages
                 String summary = conversationSummaryService.getSummary(sessionId);
@@ -216,7 +241,7 @@ public class ChatController {
                 StringBuilder fullAnswerBuilder = new StringBuilder();
                 
                 // 使用 agent.stream() 进行流式对话（历史 + 当前问题以原生多轮消息传入）
-                List<Message> messages = chatService.buildMessages(history, request.getQuestion());
+                List<Message> messages = chatService.buildMessages(history, questionForModel);
                 Flux<NodeOutput> stream = agent.stream(messages);
                 
                 stream.subscribe(
@@ -273,16 +298,21 @@ public class ChatController {
                                 request.getId(), fullAnswer.length());
                             
                             // 更新会话历史（持久化到 MySQL）
-                            chatMemoryService.appendTurn(sessionId, request.getQuestion(), fullAnswer);
+                            chatMemoryService.appendTurn(sessionId, questionForModel, fullAnswer);
                             logger.info("已更新会话历史 - SessionId: {}, 当前消息对数: {}", 
                                 sessionId, chatMemoryService.getPairCount(sessionId));
 
-                            // 异步：分级提炼经验 + 滚动摘要 + 情景记忆归档，不阻塞响应
+                            // 异步：分级提炼经验 + 聊天闭环反馈 + 滚动摘要 + 情景记忆归档，不阻塞响应
                             executor.execute(() -> {
-                                experienceService.distillAndStore(
-                                        sessionId, request.getQuestion(), fullAnswer, false);
+                                closeChatExperienceLoop(
+                                        sessionId,
+                                        originalQuestion.isEmpty() ? questionForModel : originalQuestion,
+                                        fullAnswer, recalled);
                                 conversationSummaryService.rollupIfNeeded(sessionId);
-                                episodicMemoryService.archiveTurn(sessionId, request.getQuestion(), fullAnswer);
+                                episodicMemoryService.archiveTurn(
+                                        sessionId,
+                                        originalQuestion.isEmpty() ? questionForModel : originalQuestion,
+                                        fullAnswer);
                             });
                             
                             // 发送完成标记（data 携带服务端实际使用的 sessionId，便于客户端续接会话）
@@ -332,23 +362,20 @@ public class ChatController {
 
                 emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
 
-                // 召回相关历史经验，作为 Planner 的参考输入，并记录命中经验 ID 用于闭环评分
-                String opsRecallQuery = "系统告警 CPU 内存 磁盘 响应时间 根因 排查 运维";
+                String alertsSnapshot = queryMetricsTools.queryPrometheusAlerts();
+                List<String> firingNames = queryMetricsTools.extractFiringNames(alertsSnapshot);
+                String opsRecallQuery = queryMetricsTools.toExperienceRecallQuery(alertsSnapshot);
+                logger.info("一键排障召回查询 firing={}, query={}", firingNames, opsRecallQuery);
                 List<ExperienceService.RecalledExperience> recalled =
-                        experienceService.recall(opsRecallQuery, null);
+                        experienceService.recall(opsRecallQuery, experienceService.extractEnvHint(opsRecallQuery));
                 String experienceBlock = experienceService.formatExperienceBlock(recalled);
-                List<String> recalledExpIds = new ArrayList<>();
-                for (ExperienceService.RecalledExperience re : recalled) {
-                    recalledExpIds.add(re.getExpId());
-                }
 
-                // 调用 AiOpsService 执行分析流程（注入历史经验）
                 Optional<OverAllState> overAllStateOptional =
-                        aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks, experienceBlock);
+                        aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks, experienceBlock, alertsSnapshot);
 
                 if (overAllStateOptional.isEmpty()) {
-                    // 闭环负反馈：编排走完但没有产出有效结果，本次采纳的召回经验未起效，下调置信度
-                    executor.execute(() -> experienceLifecycleService.feedbackBatch(recalledExpIds, false));
+                    // 没有产出则经验未被采纳，不再对全部召回条目负反馈
+                    logger.warn("多 Agent 编排未获取到有效结果，跳过经验评分");
                     emitter.send(SseEmitter.event().name("message")
                             .data(SseMessage.error("多 Agent 编排未获取到有效结果"), MediaType.APPLICATION_JSON));
                     emitter.complete();
@@ -389,17 +416,24 @@ public class ChatController {
                     
                     logger.info("最终报告已完整输出");
 
-                    // 闭环：报告成功生成 → 对本次采纳的召回经验自动回写成功评分，并将报告沉淀为新经验
                     final String reportForDistill = finalReportText;
+                    boolean grounded = firingNames.isEmpty()
+                            || firingNames.stream().anyMatch(name ->
+                            name != null && !name.isBlank() && reportForDistill.contains(name));
                     executor.execute(() -> {
-                        experienceLifecycleService.feedbackBatch(recalledExpIds, true);
+                        List<String> adopted = experienceService.selectAdoptedExpIds(reportForDistill, recalled);
+                        if (!grounded) {
+                            logger.warn("一键排障报告未覆盖当前 firing 告警 {}，对已采纳经验负反馈 adopted={}",
+                                    firingNames, adopted);
+                            applyAdoptedFeedback(adopted, false);
+                            return;
+                        }
+                        applyAdoptedFeedback(adopted, true);
                         experienceService.distillAndStore("aiops-" + System.currentTimeMillis(),
                                 "自动告警分析任务", reportForDistill, false);
                     });
                 } else {
-                    logger.warn("未能提取到 Planner 最终报告");
-                    // 闭环负反馈：流程完成但未产出可用报告，对本次采纳的召回经验回写失败评分
-                    executor.execute(() -> experienceLifecycleService.feedbackBatch(recalledExpIds, false));
+                    logger.warn("未能提取到 Planner 最终报告，跳过经验评分");
                     emitter.send(SseEmitter.event().name("message")
                             .data(SseMessage.content("⚠️ 多 Agent 流程已完成，但未能生成最终报告。"), MediaType.APPLICATION_JSON));
                 }
@@ -423,6 +457,78 @@ public class ChatController {
         return emitter;
     }
 
+    /**
+     * 聊天闭环：回答里真正用到的经验才记使用；若本轮提炼合并进了已召回条目，视为复用成功。
+     */
+    private void closeChatExperienceLoop(String sessionId, String question, String answer,
+                                         List<ExperienceService.RecalledExperience> recalled) {
+        try {
+            List<String> adopted = new ArrayList<>(experienceService.selectAdoptedExpIds(answer, recalled));
+            String storedId = experienceService.distillAndStore(sessionId, question, answer, false);
+            boolean mergedIntoRecalled = storedId != null && recalled != null
+                    && recalled.stream().anyMatch(re -> storedId.equals(re.getExpId()));
+            if (mergedIntoRecalled && !adopted.contains(storedId)) {
+                adopted.add(storedId);
+            }
+            experienceService.markUsed(adopted);
+            if (mergedIntoRecalled) {
+                experienceLifecycleService.feedback(storedId, true);
+            }
+        } catch (Exception e) {
+            logger.warn("聊天经验闭环失败（不影响主流程）- session={}: {}", sessionId, e.getMessage());
+        }
+    }
+
+    /**
+     * 只对采纳的经验记使用并回写评分；未引用则不动元数据。
+     */
+    private void applyAdoptedFeedback(List<String> adopted, boolean success) {
+        if (adopted == null || adopted.isEmpty()) {
+            logger.info("本次无被采纳的历史经验，跳过评分回写 success={}", success);
+            return;
+        }
+        experienceService.markUsed(adopted);
+        experienceLifecycleService.feedbackBatch(adopted, success);
+    }
+
+    /**
+     * 上传本轮聊天附件。只落到当前会话目录，不写入知识库 / Milvus。
+     */
+    @PostMapping(value = "/chat/attachments", consumes = "multipart/form-data")
+    public ResponseEntity<ApiResponse<ChatAttachment>> uploadChatAttachment(
+            @RequestParam("sessionId") String sessionId,
+            @RequestParam("file") MultipartFile file) {
+        try {
+            ChatAttachment attachment = chatAttachmentService.save(sessionId, file);
+            return ResponseEntity.ok(ApiResponse.success(attachment));
+        } catch (IllegalArgumentException e) {
+            logger.warn("聊天附件上传被拒绝: {}", e.getMessage());
+            return ResponseEntity.badRequest().body(ApiResponse.error(e.getMessage()));
+        } catch (Exception e) {
+            logger.error("聊天附件上传失败", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResponse.error("附件上传失败: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * 移除尚未发送的聊天附件。
+     */
+    @DeleteMapping("/chat/attachments/{attachmentId}")
+    public ResponseEntity<ApiResponse<String>> deleteChatAttachment(
+            @RequestParam("sessionId") String sessionId,
+            @PathVariable String attachmentId) {
+        try {
+            chatAttachmentService.delete(sessionId, attachmentId);
+            return ResponseEntity.ok(ApiResponse.success("已移除附件"));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(ApiResponse.error(e.getMessage()));
+        } catch (Exception e) {
+            logger.error("删除聊天附件失败", e);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(ApiResponse.error("删除附件失败: " + e.getMessage()));
+        }
+    }
 
     /**
      * 获取会话信息
@@ -460,6 +566,15 @@ public class ChatController {
         return sessionId;
     }
 
+    private boolean hasChatInput(ChatRequest request) {
+        return !trimQuestion(request).isEmpty()
+                || chatAttachmentService.hasAttachments(request.getAttachmentIds());
+    }
+
+    private String trimQuestion(ChatRequest request) {
+        return request.getQuestion() == null ? "" : request.getQuestion().trim();
+    }
+
     /**
      * 聊天请求
      */
@@ -477,6 +592,11 @@ public class ChatController {
         @com.fasterxml.jackson.annotation.JsonProperty(value = "Provider")
         @com.fasterxml.jackson.annotation.JsonAlias({"provider", "PROVIDER"})
         private String Provider;
+
+        /** 本轮聊天附件 ID，对应 /api/chat/attachments，不进入知识库 */
+        @com.fasterxml.jackson.annotation.JsonProperty(value = "AttachmentIds")
+        @com.fasterxml.jackson.annotation.JsonAlias({"attachmentIds", "attachment_ids"})
+        private List<String> attachmentIds;
 
     }
 
