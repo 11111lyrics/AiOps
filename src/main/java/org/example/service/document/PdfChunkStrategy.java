@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * PDF 分片策略：每个 TextBlock 对应一页，页内超长时再段落 → 字符切分
+ * PDF 分片策略：每个 TextBlock 对应一页，页内超长时再段落优先、按句填充
  */
 @Component
 public class PdfChunkStrategy implements ChunkStrategy {

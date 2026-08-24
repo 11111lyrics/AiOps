@@ -14,7 +14,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Markdown 分片策略：按 # 标题 → 段落 → 字符
+ * Markdown 分片策略：按 # 标题 → 段落优先 → 按句填充
  */
 @Component
 public class MarkdownChunkStrategy implements ChunkStrategy {

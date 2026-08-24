@@ -11,7 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 纯文本分片策略：段落 → 字符（不识别 Markdown 标题）
+ * 纯文本分片策略：段落优先、按句填充（不识别 Markdown 标题）
  */
 @Component
 public class PlainTextChunkStrategy implements ChunkStrategy {

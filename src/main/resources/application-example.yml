@@ -17,6 +17,12 @@ file:
     path: ./uploads
     allowed-extensions: txt,md,markdown,pdf,doc,docx
 
+# 聊天附件（不入知识库）：单轮拼进模型的文本上限、最多文件数
+chat:
+  attachment:
+    max-chars: 24000
+    max-files: 5
+
 milvus:
   host: 192.168.150.101          # Milvus 所在主机 IP（本机 Docker 填 localhost）
   port: 19530
@@ -100,7 +106,7 @@ dashscope:
   api:
     key: your-dashscope-api-key
   embedding:
-    model: text-embedding-v4
+    model: qwen3.7-text-embedding
 
 document:
   chunk:
@@ -115,16 +121,16 @@ document:
     isolate-collection: true
     timeout-ms: 600000
     paddle:
-      base-url: http://127.0.0.1:8080
+      base-url: http://127.0.0.1:8080   # 已确认本机空闲
       path: /layout-parsing
       health-path: /health
       use-chart-recognition: true
       use-ocr-for-image-block: true
     mineru:
-      base-url: http://127.0.0.1:8000
+      base-url: http://127.0.0.1:8000   # 已确认本机空闲
       path: /file_parse
       health-path: /health
-      backend: pipeline       # pipeline | vlm-engine | hybrid-engine
+      backend: pipeline       # 本机 API：pipeline | vlm-engine | hybrid-engine；预加载 VLM 后用 vlm-engine
       parse-method: auto
       lang: ch
       formula-enable: true
@@ -133,6 +139,9 @@ document:
 rag:
   top-k: 3
   recall-top-k: 10
+  hyde:
+    enabled: true
+    max-tokens: 400
   rerank:
     enabled: true
     model: qwen3-rerank
@@ -145,7 +154,8 @@ aiops:
     sync-interval-ms: 1800000   # 30 分钟；首次延迟同样时长，避免与启动扫描重叠
 
 prometheus:
-  # 经本机 SSH 隧道访问 tjxt。不要用 192.168.150.101:9090（经验库虚机误装）
+  # 经本机 SSH 隧道访问 tjxt。先运行: ssh -N -o ServerAliveInterval=30 -L 9090:127.0.0.1:9090 -p 10023 root@10.195.86.203
+  # 不要用 192.168.150.101:9090（经验库虚机误装）
   base-url: http://127.0.0.1:9090
   timeout: 15
 
@@ -194,10 +204,10 @@ experience:
   distill:
     min-confidence: 0.6
     new-pattern-threshold: 0.5
-    update-threshold: 0.85 # 与已有经验相似度达到该值时合并更新而非新增
+    update-threshold: 0.85 # 高相似且故障模式一致时合并；宕机 vs 连接打满不会合并
   temp:
     ttl-days: 365          # 仅用于清理 experience_temp 存量数据（弱经验现已直接入 Milvus）
-  # 弱触发经验：入 Milvus 参与召回（tier=weak、置信度打折），评分成功后晋升 strong
+  # 弱触发经验：新模式默认 weak，入 Milvus 参与召回（置信度打折），评分成功后晋升 strong
   weak:
     initial-factor: 0.7    # 弱经验初始置信度 = 提炼置信度 × 该系数
     promote-confidence: 0.7 # 置信度达到该值后 weak 晋升为 strong
