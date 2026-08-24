@@ -44,7 +44,18 @@ public class PdfDocumentProcessor extends AbstractDocumentProcessor {
             return extractByPage(file);
         } catch (Exception e) {
             logger.warn("PDF 按页提取失败，回退 Tika 整文提取: {}, 原因: {}", file, e.getMessage());
+            return extractByTikaSafely(file);
+        } catch (ExceptionInInitializerError | NoClassDefFoundError e) {
+            logger.warn("PDFBox 字体初始化失败，回退 Tika 整文提取: {}, 原因: {}", file, e.getMessage());
+            return extractByTikaSafely(file);
+        }
+    }
+
+    private List<TextBlock> extractByTikaSafely(Path file) throws Exception {
+        try {
             return extractByTika(file);
+        } catch (ExceptionInInitializerError | NoClassDefFoundError e) {
+            throw new IllegalStateException("PDF Tika 提取失败: " + e.getMessage(), e);
         }
     }
 

@@ -6,6 +6,7 @@ import org.example.service.VectorIndexService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,6 +21,9 @@ import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
 
+/**
+ * 知识库文件上传：写入 aiops-docs，再纳入目录同步。聊天附件请走 /api/chat/attachments。
+ */
 @RestController
 public class FileUploadController {
 
@@ -30,6 +34,9 @@ public class FileUploadController {
 
     @Autowired
     private VectorIndexService vectorIndexService;
+
+    @Value("${aiops.docs.path:./aiops-docs}")
+    private String docsPath;
 
     @PostMapping(value = "/api/upload", consumes = "multipart/form-data")
     public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) {
@@ -49,14 +56,19 @@ public class FileUploadController {
         }
 
         try {
-            String uploadPath = fileUploadConfig.getPath();
-            Path uploadDir = Paths.get(uploadPath).normalize();
+            Path uploadDir = Paths.get(docsPath).toAbsolutePath().normalize();
             if (!Files.exists(uploadDir)) {
                 Files.createDirectories(uploadDir);
             }
 
-            // 使用原始文件名，而不是UUID，以便实现基于文件名的去重
-            Path filePath = uploadDir.resolve(originalFilename).normalize();
+            Path fileName = Paths.get(originalFilename).getFileName();
+            if (fileName == null) {
+                return ResponseEntity.badRequest().body("文件名不能为空");
+            }
+            Path filePath = uploadDir.resolve(fileName.toString()).normalize();
+            if (!filePath.startsWith(uploadDir)) {
+                return ResponseEntity.badRequest().body("非法文件名");
+            }
             
             // 如果文件已存在，先删除旧文件（实现覆盖更新）
             if (Files.exists(filePath)) {

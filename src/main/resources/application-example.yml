@@ -106,6 +106,29 @@ document:
   chunk:
     max-size: 800
     overlap: 100
+  # 知识库解析对比：关=PDFBox/Tika 基线；开=入库前调本地 PaddleOCR-VL 或 MinerU。
+  # 8G 显存一次只开一个引擎。isolate-collection=true 时写入 biz / biz_paddle / biz_mineru，互不覆盖。
+  parse:
+    enabled: false
+    engine: baseline          # baseline | paddle | mineru；MinerU VLM 预加载后改 enabled=true、engine=mineru
+    fallback-to-baseline: true
+    isolate-collection: true
+    timeout-ms: 600000
+    paddle:
+      base-url: http://127.0.0.1:8080
+      path: /layout-parsing
+      health-path: /health
+      use-chart-recognition: true
+      use-ocr-for-image-block: true
+    mineru:
+      base-url: http://127.0.0.1:8000
+      path: /file_parse
+      health-path: /health
+      backend: pipeline       # pipeline | vlm-engine | hybrid-engine
+      parse-method: auto
+      lang: ch
+      formula-enable: true
+      table-enable: true
 
 rag:
   top-k: 3
@@ -117,8 +140,9 @@ rag:
 
 aiops:
   docs:
-    auto-import: false          # true 时启动扫描目录，仅对尚未入库的新增文档切片
+    auto-import: true           # 启动与定时扫描 aiops-docs：新增入库、删除去向量、文件变化则重建
     path: ./aiops-docs
+    sync-interval-ms: 1800000   # 30 分钟；首次延迟同样时长，避免与启动扫描重叠
 
 prometheus:
   base-url: http://192.168.150.101:9090

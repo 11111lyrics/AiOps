@@ -8,9 +8,16 @@ public class MilvusConstants {
     public static final String MILVUS_DB_NAME = "default";
     
     /**
-     * Milvus 集合名称
+     * Milvus 集合名称（基线知识库）
      */
     public static final String MILVUS_COLLECTION_NAME = "biz";
+
+    public static String knowledgeCollectionFor(String parserId) {
+        if (parserId == null || parserId.isBlank() || "baseline".equalsIgnoreCase(parserId.trim())) {
+            return MILVUS_COLLECTION_NAME;
+        }
+        return MILVUS_COLLECTION_NAME + "_" + parserId.trim().toLowerCase();
+    }
 
     /**
      * 经验沉淀集合名称（存向量 + 不可变结构化经验，可变生命周期元数据在 MySQL）

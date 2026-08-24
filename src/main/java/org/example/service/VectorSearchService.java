@@ -9,7 +9,7 @@ import io.milvus.param.dml.SearchParam;
 import io.milvus.response.SearchResultsWrapper;
 import lombok.Getter;
 import lombok.Setter;
-import org.example.constant.MilvusConstants;
+import org.example.service.parse.KnowledgeCollectionService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,6 +34,9 @@ public class VectorSearchService {
     @Autowired
     private VectorEmbeddingService embeddingService;
 
+    @Autowired
+    private KnowledgeCollectionService knowledgeCollectionService;
+
     /**
      * 搜索相似文档
      * 
@@ -42,7 +45,8 @@ public class VectorSearchService {
      * @return 搜索结果列表
      */
     public List<SearchResult> searchSimilarDocuments(String query, int topK) {
-        return searchSimilarDocuments(query, topK, MilvusConstants.MILVUS_COLLECTION_NAME);
+        knowledgeCollectionService.ensureCurrent();
+        return searchSimilarDocuments(query, topK, knowledgeCollectionService.currentCollection());
     }
 
     /**
