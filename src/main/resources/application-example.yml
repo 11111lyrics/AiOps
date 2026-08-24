@@ -145,14 +145,13 @@ aiops:
     sync-interval-ms: 1800000   # 30 分钟；首次延迟同样时长，避免与启动扫描重叠
 
 prometheus:
-  base-url: http://192.168.150.101:9090
-  timeout: 10
-  mock-enabled: false
+  # 经本机 SSH 隧道访问 tjxt。不要用 192.168.150.101:9090（经验库虚机误装）
+  base-url: http://127.0.0.1:9090
+  timeout: 15
 
 # CLS 云日志服务配置
 # 日志集 ID / 主题 ID：CLS 控制台 → 日志集/日志主题 → 基本信息
 cls:
-  mock-enabled: false
   region: ap-chengdu                    # 与日志集/主题所在地域一致
   logset-id: "bd870dc4-1b4d-4b60-b377-c7d1e297e9f4"
   topics:

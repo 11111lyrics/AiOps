@@ -8,7 +8,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.agent.tool.DateTimeTools;
 import org.example.agent.tool.InternalDocsTools;
-import org.example.agent.tool.QueryLogsTools;
 import org.example.agent.tool.QueryMetricsTools;
 import org.example.agent.tool.SkillTools;
 import org.slf4j.Logger;
@@ -41,9 +40,6 @@ public class AiOpsService {
     @Autowired
     private QueryMetricsTools queryMetricsTools;
 
-    @Autowired(required = false)  // Mock 模式下才注册
-    private QueryLogsTools queryLogsTools;
-
     @Autowired
     private SkillTools skillTools;
 
@@ -71,13 +67,17 @@ public class AiOpsService {
      */
     public Optional<OverAllState> executeAiOpsAnalysis(ChatModel chatModel, ToolCallback[] toolCallbacks,
                                                        String experienceBlock) throws GraphRunnerException {
+        return executeAiOpsAnalysis(chatModel, toolCallbacks, experienceBlock, null);
+    }
+
+    public Optional<OverAllState> executeAiOpsAnalysis(ChatModel chatModel, ToolCallback[] toolCallbacks,
+                                                       String experienceBlock, String alertsSnapshot)
+            throws GraphRunnerException {
         logger.info("开始执行 AI Ops 多 Agent 协作流程");
 
-        // 构建 Planner 和 Executor Agent
         ReactAgent plannerAgent = buildPlannerAgent(chatModel, toolCallbacks);
         ReactAgent executorAgent = buildExecutorAgent(chatModel, toolCallbacks);
 
-        // 构建 Supervisor Agent
         SupervisorAgent supervisorAgent = SupervisorAgent.builder()
                 .name("ai_ops_supervisor")
                 .description("负责调度 Planner 与 Executor 的多 Agent 控制器")
@@ -86,13 +86,21 @@ public class AiOpsService {
                 .subAgents(List.of(plannerAgent, executorAgent))
                 .build();
 
-        String taskPrompt = "你是企业级 SRE，接到了自动化告警排查任务。请结合工具调用，执行**规划→执行→再规划**的闭环，并最终按照固定模板输出《告警分析报告》。禁止编造虚假数据，如连续多次查询失败需诚实反馈无法完成的原因。";
-        if (experienceBlock != null && !experienceBlock.isBlank()) {
-            taskPrompt = experienceBlock + "\n" + taskPrompt;
+        StringBuilder task = new StringBuilder();
+        if (alertsSnapshot != null && !alertsSnapshot.isBlank()) {
+            task.append("【当前 Prometheus 告警快照】系统在启动一键排障时拉取，执行中仍须用 queryPrometheusAlerts 复核。\n");
+            task.append("若工具调用因连接重置失败，不得据此写成「当前无告警」；有 firing 告警时以本快照继续排查。\n");
+            task.append(alertsSnapshot).append("\n\n");
         }
+        if (experienceBlock != null && !experienceBlock.isBlank()) {
+            task.append(experienceBlock).append('\n');
+        }
+        task.append("你是企业级 SRE，接到了自动化告警排查任务。请结合工具调用，执行**规划→执行→再规划**的闭环，并最终按照固定模板输出《告警分析报告》。");
+        task.append("优先围绕当前 firing 告警定位根因与处置；历史经验仅供参考，必须用当前告警/日志验证后再采纳。");
+        task.append("禁止编造虚假数据。Prometheus 连接失败 ≠ 没有告警；CLS 日志量为 0 ≠ 业务无故障。");
 
         logger.info("调用 Supervisor Agent 开始编排...");
-        return supervisorAgent.invoke(taskPrompt);
+        return supervisorAgent.invoke(task.toString());
     }
 
     /**
@@ -224,17 +232,10 @@ public class AiOpsService {
     }
 
     /**
-     * 动态构建方法工具数组
-     * 根据 cls.mock-enabled 决定是否包含 QueryLogsTools
+     * 构建本地方法工具数组（日志查询由 MCP 提供，不在此注册）
      */
     private Object[] buildMethodToolsArray() {
-        if (queryLogsTools != null) {
-            // Mock 模式：包含 QueryLogsTools
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, skillTools, queryLogsTools};
-        } else {
-            // 真实模式：不包含 QueryLogsTools（由 MCP 提供日志查询功能）
-            return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, skillTools};
-        }
+        return new Object[]{dateTimeTools, internalDocsTools, queryMetricsTools, skillTools};
     }
 
     /**
@@ -243,11 +244,15 @@ public class AiOpsService {
     private String buildPlannerPrompt() {
         return """
                 你是 Planner Agent，同时承担 Replanner 角色，负责：
-                1. 读取当前输入任务 {input} 以及 Executor 的最近反馈 {executor_feedback}。
-                2. 分析 Prometheus 告警、日志、内部文档等信息，制定可执行的下一步步骤。
+                1. 读取当前输入任务 {input} 以及 Executor 的最近反馈 {executor_feedback}。任务中若已有【当前 Prometheus 告警快照】，把它当作已确认的 firing 告警清单。
+                2. 分析 Prometheus 告警、日志、内部文档等信息，制定可执行的下一步步骤。一键排障的主证据是 Prometheus firing 告警，不是 CLS 是否还有新日志。
                 3. 在执行阶段，输出 JSON，包含 decision (PLAN|EXECUTE|FINISH)、step 描述、预期要调用的工具、以及必要的上下文。
-                4. 需要查询腾讯云 CLS 日志时，先调用 loadSkill（name=cls-log-query），再按 skill 中的顺序使用 MCP 工具；禁止凭记忆编造调用顺序。Region 不确定时省略以使用默认值。
-                5. 严格禁止编造数据，只能引用工具返回的真实内容；如果连续 3 次调用同一工具仍失败或返回空结果，需停止该方向并在最终报告的结论部分说明"无法完成"的原因。
+                4. 需要查询腾讯云 CLS 日志时，先调用 loadSkill（name=cls-log-query），再按 skill 中的顺序使用 MCP 工具；SearchLog 前必须 TextToSearchLogQuery，禁止 level:ERROR 以及 UnknownHostException: 等异常类字段检索，改用全文 "UnknownHostException"。Region 不确定时省略以使用默认值。
+                5. 严格禁止编造数据，只能引用工具返回的真实内容。queryPrometheusAlerts 因连接重置失败时，应提示 Executor 重试，或直接使用任务里的告警快照；不得把接口失败写成「当前无告警 / 环境停机」。
+                6. CLS 近 15 分钟日志量为 0 只能说明采集或文件未写入，不能用来否定已经 firing 的告警。此时仍须围绕告警名（如 MySQLDown / RedisDown）给根因和处置。
+                7. 历史经验仅供参考。与当前告警名称/实例不符的旧经验禁止当主因。处理建议优先恢复告警对应的中间件或进程，禁止把「重启全部微服务」当作首选。
+                8. 若采纳任务中的某条历史经验，必须在对应「根因结论」中写明「采用经验: <expId>」。可信度以经验条目头部为准。
+                9. 如果连续 3 次调用同一工具仍失败或返回空结果，停止该方向，但已注入的 firing 告警仍必须出现在最终报告的活跃告警清单与根因分析中。
 
                 ## 最终报告输出要求（CRITICAL）
                 
@@ -341,17 +346,19 @@ public class AiOpsService {
         return """
                 你是 Executor Agent，负责读取 Planner 最新输出 {planner_plan}，只执行其中的第一步。
                 - 确认步骤所需的工具与参数；Region 未给出时使用默认区域。
-                - 查询 CLS 日志前必须先调用 loadSkill（name=cls-log-query），再严格按 skill 中的 MCP 顺序执行；禁止使用 queryLogs 等本地 Mock 工具，禁止编造日志。
+                - 查询 CLS 日志前必须先调用 loadSkill（name=cls-log-query），再严格按 skill 中的 MCP 顺序执行；SearchLog 前必须 TextToSearchLogQuery；禁止 level:ERROR 以及 UnknownHostException: 等「标识符:」字段检索（本环境无这些索引），改用全文 ERROR 或 "UnknownHostException"；同一条 CQL 报 not indexed / SyntaxError 后禁止原样重试，把报错中的 field 改成带引号全文词。禁止编造日志。
+                - queryPrometheusAlerts 失败时允许按 Planner 要求再试；不要把连接失败总结成「无告警」。
+                - CLS 检索 0 条时如实记录，同时写明这不能推翻 Prometheus firing 告警。
                 - 调用相应的工具并收集结果，如工具返回错误或空数据，需要将失败原因、请求参数一并记录，并停止进一步调用该工具（同一工具失败达到 3 次时应直接返回 FAILED）。
-                - 将日志、指标、文档等证据整理成结构化摘要，标注对应的告警名称或资源，方便 Planner 填充"告警根因分析 / 处理方案执行"章节。
+                - 将日志、指标、文档等证据整理成结构化摘要，标注对应的告警名称、实例（如 3306）或资源，方便 Planner 填充"告警根因分析 / 处理方案执行"章节。
                 - 以 JSON 形式返回执行状态、证据以及给 Planner 的建议，写入 executor_feedback，严禁编造未实际查询到的内容。
 
                 输出示例：
                 {
                   "status": "SUCCESS",
-                  "summary": "近1小时未见 error 日志，仅有 info",
+                  "summary": "Prometheus firing MySQLDown，实例 192.168.150.101:3306；CLS 近 15 分钟无新日志，采集可能中断，不能据此否定告警",
                   "evidence": "...",
-                  "nextHint": "建议转向高占用进程"
+                  "nextHint": "按告警对应组件给出恢复步骤，不要先重启全部业务"
                 }
                 """;
     }
@@ -368,7 +375,8 @@ public class AiOpsService {
                 4. FINISH 后，确保向最终用户输出完整的《告警分析报告》，格式必须严格为：
                    告警分析报告\n---\n# 告警处理详情\n## 活跃告警清单\n## 告警根因分析N\n## 处理方案执行N\n## 结论。
                 5. 若步骤涉及腾讯云 CLS 日志，确保 Executor 先 loadSkill（name=cls-log-query）再查日志，不要凭记忆跳过 skill。
-                6. 如果发现 Planner/Executor 在同一方向连续 3 次调用工具仍失败或没有数据，必须终止流程，直接输出"任务无法完成"的报告，明确告知失败原因，严禁凭空编造结果。
+                6. Prometheus firing 告警是一键排障的主目标。CLS 无新日志或 queryPrometheusAlerts 连接失败，都不能当成「没有故障 / 环境停机」而 FINISH。
+                7. 如果发现 Planner/Executor 在同一方向连续 3 次调用工具仍失败或没有数据，可以终止该方向，但仍须基于任务中的告警快照输出《告警分析报告》，写明告警名、实例和优先恢复对应组件；严禁凭空编造日志原文。
 
                 只允许在 planner_agent、executor_agent 与 FINISH 之间做出选择。
                 """;

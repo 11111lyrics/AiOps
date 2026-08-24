@@ -12,6 +12,7 @@ import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import org.springframework.web.client.RestClient;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -29,11 +30,14 @@ public class ChatModelFactory {
 
     private final LlmProperties llmProperties;
 
+    private final RestClient.Builder restClientBuilder;
+
     @Value("${spring.ai.dashscope.api-key:}")
     private String dashScopeApiKey;
 
-    public ChatModelFactory(LlmProperties llmProperties) {
+    public ChatModelFactory(LlmProperties llmProperties, RestClient.Builder restClientBuilder) {
         this.llmProperties = llmProperties;
+        this.restClientBuilder = restClientBuilder;
     }
 
     public ChatModel create(String provider, double temperature, int maxTokens, double topP) {
@@ -104,11 +108,14 @@ public class ChatModelFactory {
         }
         String model = llmProperties.getDeepseek().getChatModel();
         String baseUrl = llmProperties.getDeepseek().getBaseUrl();
+        String thinkingType = llmProperties.getDeepseek().isThinking() ? "enabled" : "disabled";
+        // Spring AI 1.1.0 带 tools 时 extraBody 会被丢掉；HTTP 拦截器保证每次请求都带 thinking。
         OpenAiApi openAiApi = OpenAiApi.builder()
                 .baseUrl(baseUrl)
                 .apiKey(apiKey)
+                .restClientBuilder(restClientBuilder.clone()
+                        .requestInterceptor(new DeepSeekThinkingInterceptor(thinkingType)))
                 .build();
-        String thinkingType = llmProperties.getDeepseek().isThinking() ? "enabled" : "disabled";
         Map<String, Object> extraBody = new HashMap<>();
         extraBody.put("thinking", Map.of("type", thinkingType));
         return OpenAiChatModel.builder()

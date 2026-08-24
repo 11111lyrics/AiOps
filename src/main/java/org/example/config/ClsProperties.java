@@ -14,7 +14,6 @@ import java.util.Optional;
 @ConfigurationProperties(prefix = "cls")
 public class ClsProperties {
 
-    private boolean mockEnabled = false;
     private String region = "ap-chengdu";
     private String logsetId = "";
     private Map<String, String> topics = new LinkedHashMap<>();
@@ -61,7 +60,8 @@ public class ClsProperties {
             sb.append("- **日志集 ID**: ").append(logsetId).append("\n");
         }
         sb.append("- **采集路径**: `/data/tjxt/logs/{service}/**/spring.log`（LogListener 机器组 `tjxt`）\n");
-        sb.append("- 告警 label 中的服务名通常对应下表「服务键」；查日志时优先用 TopicId，或用 GetTopicInfoByName 按主题名搜索\n\n");
+        sb.append("- 告警 label 中的服务名通常对应下表「服务键」；查日志时优先用 TopicId，或用 GetTopicInfoByName 按主题名搜索\n");
+        sb.append("- 本环境几乎无键值索引：禁止 `level:ERROR` 和 `UnknownHostException:` 这类字段检索，用全文 `ERROR` 或 `\"UnknownHostException\"`；SearchLog 前须 TextToSearchLogQuery\n\n");
         sb.append("| 服务键 | 日志主题名称 | TopicId |\n");
         sb.append("|--------|-------------|--------|\n");
 
@@ -77,14 +77,6 @@ public class ClsProperties {
 
         sb.append("\n");
         return sb.toString();
-    }
-
-    public boolean isMockEnabled() {
-        return mockEnabled;
-    }
-
-    public void setMockEnabled(boolean mockEnabled) {
-        this.mockEnabled = mockEnabled;
     }
 
     public String getRegion() {

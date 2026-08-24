@@ -87,7 +87,7 @@ public class MilvusClientFactory {
     /**
      * 确保集合存在：不存在则创建集合 + 向量索引（集合 schema 统一为 id/vector/content/metadata）
      */
-    private void ensureCollection(MilvusServiceClient client, String collectionName, String description) {
+    public void ensureCollection(MilvusServiceClient client, String collectionName, String description) {
         if (!collectionExists(client, collectionName)) {
             logger.info("collection '{}' 不存在，正在创建...", collectionName);
             createCollection(client, collectionName, description);

@@ -3,19 +3,20 @@ package org.example.agent.tool;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * Prometheus 告警查询工具
@@ -25,30 +26,24 @@ import java.util.*;
 public class QueryMetricsTools {
 
     private static final Logger logger = LoggerFactory.getLogger(QueryMetricsTools.class);
-    
+
     /** 工具名常量，用于动态构建提示词 */
     public static final String TOOL_QUERY_PROMETHEUS_ALERTS = "queryPrometheusAlerts";
-    
+    private static final int FETCH_RETRIES = 8;
+    private static final String USER_AGENT = "SuperBizAgent";
+    private static final String FALLBACK_RECALL_QUERY = "当前活动告警 宕机 不可用 连接失败 根因 排查";
+
     private final ObjectMapper objectMapper = new ObjectMapper();
-    
+
     @Value("${prometheus.base-url}")
     private String prometheusBaseUrl;
-    
+
     @Value("${prometheus.timeout:10}")
     private int timeout;
-    
-    @Value("${prometheus.mock-enabled:false}")
-    private boolean mockEnabled;
-    
-    private OkHttpClient httpClient;
-    
+
     @jakarta.annotation.PostConstruct
     public void init() {
-        this.httpClient = new OkHttpClient.Builder()
-                .connectTimeout(Duration.ofSeconds(timeout))
-                .readTimeout(Duration.ofSeconds(timeout))
-                .build();
-        logger.info("✅ QueryMetricsTools 初始化成功, Prometheus URL: {}, Mock模式: {}", prometheusBaseUrl, mockEnabled);
+        logger.info("✅ QueryMetricsTools 初始化成功, Prometheus URL: {}", prometheusBaseUrl);
     }
     
     /**
@@ -59,50 +54,50 @@ public class QueryMetricsTools {
             "This tool retrieves all currently active/firing alerts including their labels, annotations, state, and values. " +
             "Use this tool when you need to check what alerts are currently firing, investigate alert conditions, or monitor alert status.")
     public String queryPrometheusAlerts() {
-        logger.info("开始查询 Prometheus 活动告警, Mock模式: {}", mockEnabled);
+        logger.info("开始查询 Prometheus 活动告警");
         
         try {
-            List<SimplifiedAlert> simplifiedAlerts;
+            PrometheusAlertsResult result = fetchPrometheusAlerts();
             
-            if (mockEnabled) {
-                // Mock 模式：返回与文档关联的模拟告警数据
-                simplifiedAlerts = buildMockAlerts();
-                logger.info("使用 Mock 数据，返回 {} 个模拟告警", simplifiedAlerts.size());
-            } else {
-                // 真实模式：调用 Prometheus Alerts API
-                PrometheusAlertsResult result = fetchPrometheusAlerts();
-                
-                if (!"success".equals(result.getStatus())) {
-                    return buildErrorResponse("Prometheus API 返回非成功状态: " + result.getStatus(), result.getError());
+            if (!"success".equals(result.getStatus())) {
+                return buildErrorResponse("Prometheus API 返回非成功状态: " + result.getStatus(), result.getError());
+            }
+            List<PrometheusAlert> rawAlerts = result.getData() != null && result.getData().getAlerts() != null
+                    ? result.getData().getAlerts() : List.of();
+
+            Set<String> seen = new HashSet<>();
+            List<SimplifiedAlert> simplifiedAlerts = new ArrayList<>();
+
+            for (PrometheusAlert alert : rawAlerts) {
+                Map<String, String> labels = alert.getLabels() != null ? alert.getLabels() : Map.of();
+                Map<String, String> annotations = alert.getAnnotations() != null ? alert.getAnnotations() : Map.of();
+                String state = alert.getState() == null ? "" : alert.getState();
+                if (!"firing".equalsIgnoreCase(state) && !"pending".equalsIgnoreCase(state)) {
+                    continue;
                 }
-                
-                // 转换为简化格式，对于相同的 alertname，只保留第一个
-                Set<String> seenAlertNames = new HashSet<>();
-                simplifiedAlerts = new ArrayList<>();
-                
-                for (PrometheusAlert alert : result.getData().getAlerts()) {
-                    String alertName = alert.getLabels().get("alertname");
-                    
-                    // 如果这个 alertname 已经存在，跳过
-                    if (seenAlertNames.contains(alertName)) {
-                        continue;
-                    }
-                    
-                    // 标记为已见过
-                    seenAlertNames.add(alertName);
-                    
-                    SimplifiedAlert simplified = new SimplifiedAlert();
-                    simplified.setAlertName(alertName);
-                    simplified.setDescription(alert.getAnnotations().getOrDefault("description", ""));
-                    simplified.setState(alert.getState());
-                    simplified.setActiveAt(alert.getActiveAt());
-                    simplified.setDuration(calculateDuration(alert.getActiveAt()));
-                    
-                    simplifiedAlerts.add(simplified);
+                String alertName = labels.getOrDefault("alertname", "");
+                String instance = firstLabel(labels, "instance", "pod", "container");
+                String key = alertName + "|" + instance;
+                if (!seen.add(key)) {
+                    continue;
+                }
+
+                SimplifiedAlert simplified = new SimplifiedAlert();
+                simplified.setAlertName(alertName);
+                simplified.setInstance(instance);
+                simplified.setSeverity(firstLabel(labels, "severity", "level"));
+                simplified.setService(firstLabel(labels, "service", "job", "exported_job"));
+                simplified.setDescription(annotations.getOrDefault("description",
+                        annotations.getOrDefault("summary", "")));
+                simplified.setState(state);
+                simplified.setActiveAt(alert.getActiveAt());
+                simplified.setDuration(calculateDuration(alert.getActiveAt()));
+                simplifiedAlerts.add(simplified);
+                if (simplifiedAlerts.size() >= 30) {
+                    break;
                 }
             }
             
-            // 构建成功响应
             PrometheusAlertsOutput output = new PrometheusAlertsOutput();
             output.setSuccess(true);
             output.setAlerts(simplifiedAlerts);
@@ -120,76 +115,121 @@ public class QueryMetricsTools {
     }
     
     /**
-     * 构建 Mock 告警数据
-     * 与 aiops-docs 文档中的告警类型对应：
-     * - HighCPUUsage: CPU使用率过高
-     * - HighMemoryUsage: 内存使用率过高
-     * - HighDiskUsage: 磁盘使用率过高
-     * - ServiceUnavailable: 服务不可用
-     * - SlowResponse: 响应时间过长
+     * 从当前告警 JSON 拼经验召回查询：用 firing 告警名/实例/描述，而不是写死 CPU/内存。
      */
-    private List<SimplifiedAlert> buildMockAlerts() {
-        List<SimplifiedAlert> alerts = new ArrayList<>();
-        Instant now = Instant.now();
-        
-        // 告警1: CPU使用率过高 - 持续约25分钟
-        SimplifiedAlert cpuAlert = new SimplifiedAlert();
-        cpuAlert.setAlertName("HighCPUUsage");
-        cpuAlert.setDescription("服务 payment-service 的 CPU 使用率持续超过 80%，当前值为 92%。" +
-                "实例: pod-payment-service-7d8f9c6b5-x2k4m，命名空间: production");
-        cpuAlert.setState("firing");
-        Instant cpuActiveAt = now.minus(25, ChronoUnit.MINUTES);
-        cpuAlert.setActiveAt(cpuActiveAt.toString());
-        cpuAlert.setDuration(calculateDuration(cpuActiveAt.toString()));
-        alerts.add(cpuAlert);
-        
-        // 告警2: 内存使用率过高 - 持续约15分钟
-        SimplifiedAlert memoryAlert = new SimplifiedAlert();
-        memoryAlert.setAlertName("HighMemoryUsage");
-        memoryAlert.setDescription("服务 order-service 的内存使用率持续超过 85%，当前值为 91%。" +
-                "JVM堆内存使用: 3.8GB/4GB，可能存在内存泄漏风险。" +
-                "实例: pod-order-service-5c7d8e9f1-m3n2p，命名空间: production");
-        memoryAlert.setState("firing");
-        Instant memoryActiveAt = now.minus(15, ChronoUnit.MINUTES);
-        memoryAlert.setActiveAt(memoryActiveAt.toString());
-        memoryAlert.setDuration(calculateDuration(memoryActiveAt.toString()));
-        alerts.add(memoryAlert);
-        
-        // 告警3: 响应时间过长 - 持续约10分钟
-        SimplifiedAlert slowAlert = new SimplifiedAlert();
-        slowAlert.setAlertName("SlowResponse");
-        slowAlert.setDescription("服务 user-service 的 P99 响应时间持续超过 3 秒，当前值为 4.2 秒。" +
-                "受影响接口: /api/v1/users/profile, /api/v1/users/orders。" +
-                "可能原因：数据库慢查询或下游服务延迟");
-        slowAlert.setState("firing");
-        Instant slowActiveAt = now.minus(10, ChronoUnit.MINUTES);
-        slowAlert.setActiveAt(slowActiveAt.toString());
-        slowAlert.setDuration(calculateDuration(slowActiveAt.toString()));
-        alerts.add(slowAlert);
-        
-        return alerts;
+    public String toExperienceRecallQuery(String alertsJson) {
+        List<SimplifiedAlert> firing = extractFiringAlerts(alertsJson);
+        if (firing.isEmpty()) {
+            return FALLBACK_RECALL_QUERY;
+        }
+        StringBuilder sb = new StringBuilder();
+        for (SimplifiedAlert alert : firing) {
+            if (alert.getAlertName() != null && !alert.getAlertName().isBlank()) {
+                sb.append(alert.getAlertName()).append(' ');
+            }
+            if (alert.getInstance() != null && !alert.getInstance().isBlank()) {
+                sb.append(alert.getInstance()).append(' ');
+            }
+            if (alert.getService() != null && !alert.getService().isBlank()) {
+                sb.append(alert.getService()).append(' ');
+            }
+            if (alert.getDescription() != null && !alert.getDescription().isBlank()) {
+                sb.append(alert.getDescription()).append(' ');
+            }
+        }
+        sb.append("告警 根因 排查");
+        return sb.toString().trim();
     }
-    
+
+    public List<String> extractFiringNames(String alertsJson) {
+        return extractFiringAlerts(alertsJson).stream()
+                .map(SimplifiedAlert::getAlertName)
+                .filter(name -> name != null && !name.isBlank())
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    public List<SimplifiedAlert> extractFiringAlerts(String alertsJson) {
+        if (alertsJson == null || alertsJson.isBlank()) {
+            return List.of();
+        }
+        try {
+            PrometheusAlertsOutput output = objectMapper.readValue(alertsJson, PrometheusAlertsOutput.class);
+            if (output == null || !output.isSuccess() || output.getAlerts() == null) {
+                return List.of();
+            }
+            return output.getAlerts().stream()
+                    .filter(a -> a != null && "firing".equalsIgnoreCase(a.getState()))
+                    .collect(Collectors.toList());
+        } catch (Exception e) {
+            logger.debug("解析告警 JSON 失败: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
     /**
-     * 从 Prometheus API 获取告警数据
+     * 从 Prometheus API 获取告警数据。
+     * Windows 到 tjxt NAT 常见 Connection reset：不用 OkHttp（gzip / 连接池），
+     * 改走与评测脚本相近的 HttpURLConnection，并做指数退避。不回落到经验库虚机。
      */
     private PrometheusAlertsResult fetchPrometheusAlerts() throws Exception {
         String apiUrl = prometheusBaseUrl + "/api/v1/alerts";
-        logger.debug("请求 Prometheus API: {}", apiUrl);
-        
-        Request request = new Request.Builder()
-                .url(apiUrl)
-                .get()
-                .build();
-        
-        try (Response response = httpClient.newCall(request).execute()) {
-            if (!response.isSuccessful()) {
-                throw new RuntimeException("HTTP 请求失败: " + response.code());
+        Exception last = null;
+        for (int i = 1; i <= FETCH_RETRIES; i++) {
+            logger.debug("请求 Prometheus API ({}/{}): {}", i, FETCH_RETRIES, apiUrl);
+            try {
+                return getAlertsOnce(apiUrl);
+            } catch (Exception e) {
+                last = e;
+                logger.warn("查询 Prometheus 告警失败 ({}/{}): {}", i, FETCH_RETRIES, e.getMessage());
+                if (i < FETCH_RETRIES) {
+                    try {
+                        Thread.sleep(Math.min(8_000L, 500L * (1L << Math.min(i - 1, 4))));
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw ie;
+                    }
+                }
             }
-            
-            String responseBody = response.body().string();
-            return objectMapper.readValue(responseBody, PrometheusAlertsResult.class);
         }
+        throw last != null ? last : new RuntimeException("查询 Prometheus 告警失败");
+    }
+
+    private PrometheusAlertsResult getAlertsOnce(String apiUrl) throws Exception {
+        HttpURLConnection conn = (HttpURLConnection) URI.create(apiUrl).toURL().openConnection();
+        conn.setRequestMethod("GET");
+        conn.setConnectTimeout(timeout * 1000);
+        conn.setReadTimeout(timeout * 1000);
+        conn.setUseCaches(false);
+        conn.setInstanceFollowRedirects(true);
+        conn.setRequestProperty("User-Agent", USER_AGENT);
+        conn.setRequestProperty("Accept", "application/json");
+        conn.setRequestProperty("Accept-Encoding", "identity");
+        conn.setRequestProperty("Connection", "close");
+        try {
+            int code = conn.getResponseCode();
+            InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
+            String body = stream == null ? "" : new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            if (code < 200 || code >= 300) {
+                throw new RuntimeException("HTTP 请求失败: " + code);
+            }
+            if (body.isBlank()) {
+                throw new RuntimeException("Prometheus 返回空响应体");
+            }
+            return objectMapper.readValue(body, PrometheusAlertsResult.class);
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private static String firstLabel(Map<String, String> labels, String... keys) {
+        for (String key : keys) {
+            String value = labels.get(key);
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
     
     /**
@@ -269,6 +309,15 @@ public class QueryMetricsTools {
     public static class SimplifiedAlert {
         @JsonProperty("alert_name")
         private String alertName;
+
+        @JsonProperty("instance")
+        private String instance;
+
+        @JsonProperty("severity")
+        private String severity;
+
+        @JsonProperty("service")
+        private String service;
         
         @JsonProperty("description")
         private String description;
