@@ -5,6 +5,8 @@ class SuperBizAgentApp {
         this.currentProvider = this.loadProvider(); // 'deepseek' 或 'dashscope'
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
+        this.isUploading = false;
+        this.pendingAttachments = [];
         this.currentChatHistory = []; // 当前对话的消息历史
         this.chatHistories = this.loadChatHistories(); // 所有历史对话
         this.isCurrentChatFromHistory = false; // 标记当前对话是否是从历史记录加载的
@@ -111,6 +113,7 @@ class SuperBizAgentApp {
         this.modeDropdown = document.getElementById('modeDropdown');
         this.currentModeText = document.getElementById('currentModeText');
         this.fileInput = document.getElementById('fileInput');
+        this.attachmentChips = document.getElementById('attachmentChips');
         
         // 聊天区域元素
         this.chatMessages = document.getElementById('chatMessages');
@@ -255,11 +258,13 @@ class SuperBizAgentApp {
         
         // 停止所有进行中的操作
         this.isStreaming = false;
+        this.isUploading = false;
         
         // 清空输入框
         if (this.messageInput) {
             this.messageInput.value = '';
         }
+        this.clearPendingAttachments(false);
         
         // 清空当前对话历史
         this.currentChatHistory = [];
@@ -481,12 +486,13 @@ class SuperBizAgentApp {
         this.sessionId = history.id;
         this.currentChatHistory = [...history.messages];
         this.isCurrentChatFromHistory = true; // 标记为从历史记录加载
+        this.clearPendingAttachments(false);
         
         // 清空并重新渲染消息
         if (this.chatMessages) {
             this.chatMessages.innerHTML = '';
             history.messages.forEach(msg => {
-                this.addMessage(msg.type, msg.content, false, false); // false表示不是流式，false表示不保存到历史（因为已经存在）
+                this.addMessage(msg.type, msg.content, false, false, msg.attachments || []);
             });
         }
         
@@ -516,6 +522,7 @@ class SuperBizAgentApp {
             if (this.chatMessages) {
                 this.chatMessages.innerHTML = '';
             }
+            this.clearPendingAttachments(false);
             this.sessionId = this.generateSessionId();
             this.checkAndSetCentered();
             this.updateUI();
@@ -725,7 +732,7 @@ class SuperBizAgentApp {
         
         // 更新发送按钮状态
         if (this.sendButton) {
-            this.sendButton.disabled = this.isStreaming;
+            this.sendButton.disabled = this.isStreaming || this.isUploading;
         }
 
         if (this.markValuableBtn) {
@@ -737,6 +744,10 @@ class SuperBizAgentApp {
         if (this.messageInput) {
             this.messageInput.disabled = this.isStreaming;
             this.messageInput.placeholder = '问问智能OnCall助手';
+        }
+        if (this.uploadFileItem) {
+            this.uploadFileItem.style.pointerEvents = (this.isStreaming || this.isUploading) ? 'none' : '';
+            this.uploadFileItem.style.opacity = (this.isStreaming || this.isUploading) ? '0.5' : '';
         }
     }
 
@@ -751,31 +762,31 @@ class SuperBizAgentApp {
         if (this.messageInput) {
             message = this.messageInput.value.trim();
         }
+        const attachmentIds = this.pendingAttachments.map(item => item.id);
         
-        if (!message) {
-            this.showNotification('请输入消息内容', 'warning');
+        if (!message && attachmentIds.length === 0) {
+            this.showNotification('请输入消息或添加附件', 'warning');
             return;
         }
 
-        if (this.isStreaming) {
-            this.showNotification('请等待当前对话完成', 'warning');
+        if (this.isStreaming || this.isUploading) {
+            this.showNotification(this.isUploading ? '请等待附件上传完成' : '请等待当前对话完成', 'warning');
             return;
         }
 
-        // 显示用户消息
-        this.addMessage('user', message);
+        const displayText = message || '请阅读附件';
+        this.addMessage('user', displayText, false, true, [...this.pendingAttachments]);
         
-        // 清空输入框
         if (this.messageInput) {
             this.messageInput.value = '';
         }
+        this.clearPendingAttachments(false);
 
-        // 设置发送状态
         this.isStreaming = true;
         this.updateUI();
 
         try {
-            await this.sendStreamMessage(message);
+            await this.sendStreamMessage(message, attachmentIds);
         } catch (error) {
             console.error('发送消息失败:', error);
             this.addMessage('assistant', '抱歉，发送消息时出现错误：' + error.message);
@@ -847,7 +858,7 @@ class SuperBizAgentApp {
     }
 
     // 发送流式消息
-    async sendStreamMessage(message) {
+    async sendStreamMessage(message, attachmentIds = []) {
         try {
             const response = await fetch(`${this.apiBaseUrl}/chat_stream`, {
                 method: 'POST',
@@ -857,7 +868,8 @@ class SuperBizAgentApp {
                 body: JSON.stringify({
                     Id: this.sessionId,
                     Question: message,
-                    Provider: this.currentProvider
+                    Provider: this.currentProvider,
+                    AttachmentIds: attachmentIds
                 })
             });
 
@@ -991,15 +1003,18 @@ class SuperBizAgentApp {
     }
 
     // 添加消息到聊天界面
-    addMessage(type, content, isStreaming = false, saveToHistory = true) {
+    addMessage(type, content, isStreaming = false, saveToHistory = true, attachments = []) {
         // 检查是否是第一条消息，如果是则移除居中样式
         const isFirstMessage = this.chatMessages && this.chatMessages.querySelectorAll('.message').length === 0;
         
         // 保存消息到当前对话历史（如果不是流式消息且需要保存）
-        if (!isStreaming && saveToHistory && content) {
+        if (!isStreaming && saveToHistory && (content || (attachments && attachments.length))) {
             this.currentChatHistory.push({
                 type: type,
                 content: content,
+                attachments: attachments && attachments.length
+                    ? attachments.map(item => ({ fileName: item.fileName, size: item.size }))
+                    : undefined,
                 timestamp: new Date().toISOString()
             });
         }
@@ -1022,6 +1037,18 @@ class SuperBizAgentApp {
         // 创建消息内容包装器
         const messageContentWrapper = document.createElement('div');
         messageContentWrapper.className = 'message-content-wrapper';
+
+        if (type === 'user' && attachments && attachments.length) {
+            const filesRow = document.createElement('div');
+            filesRow.className = 'message-attachments';
+            attachments.forEach(item => {
+                const chip = document.createElement('span');
+                chip.className = 'message-attachment-chip';
+                chip.textContent = item.fileName || '附件';
+                filesRow.appendChild(chip);
+            });
+            messageContentWrapper.appendChild(filesRow);
+        }
 
         const messageContent = document.createElement('div');
         messageContent.className = 'message-content';
@@ -1195,84 +1222,131 @@ class SuperBizAgentApp {
         }, 3000);
     }
 
-    // 处理文件选择
+    // 处理文件选择：上传为当前会话附件，不进入知识库
     handleFileSelect(event) {
-        const file = event.target.files[0];
-        if (file) {
-            // 验证文件格式
-            if (!this.validateFileType(file)) {
-                this.showNotification('只支持上传 TXT、Markdown、PDF、Word 格式的文件', 'error');
-                this.fileInput.value = '';
-                return;
-            }
-            this.uploadFile(file);
+        const files = Array.from(event.target.files || []);
+        if (this.fileInput) {
+            this.fileInput.value = '';
         }
+        if (!files.length) {
+            return;
+        }
+        files.forEach(file => this.uploadAttachment(file));
     }
 
-    // 验证文件类型
     validateFileType(file) {
         const fileName = file.name.toLowerCase();
         const allowedExtensions = ['.txt', '.md', '.markdown', '.pdf', '.doc', '.docx'];
         return allowedExtensions.some(ext => fileName.endsWith(ext));
     }
 
-    // 上传文件到知识库
-    async uploadFile(file) {
-        // 再次验证文件类型（双重保险）
+    async uploadAttachment(file) {
         if (!this.validateFileType(file)) {
-            this.showNotification('只支持上传 TXT、Markdown、PDF、Word 格式的文件', 'error');
+            this.showNotification('只支持 TXT、Markdown、PDF、Word 作为聊天附件', 'error');
             return;
         }
-
-        // 验证文件大小（限制为50MB）
         const maxSize = 50 * 1024 * 1024;
         if (file.size > maxSize) {
             this.showNotification('文件大小不能超过50MB', 'error');
             return;
         }
+        if (this.pendingAttachments.length >= 5) {
+            this.showNotification('单轮最多附加 5 个文件', 'warning');
+            return;
+        }
 
-        // 锁定前端并显示上传遮罩层
-        this.isStreaming = true;
+        this.isUploading = true;
         this.updateUI();
-        this.showUploadOverlay(true, file.name);
 
         try {
-            // 创建 FormData
             const formData = new FormData();
             formData.append('file', file);
-
-            // 发送上传请求
-            const response = await fetch(`${this.apiBaseUrl}/upload`, {
-                method: 'POST',
-                body: formData
+            const response = await fetch(
+                `${this.apiBaseUrl}/chat/attachments?sessionId=${encodeURIComponent(this.sessionId)}`,
+                { method: 'POST', body: formData }
+            );
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || (data.code && data.code !== 200)) {
+                throw new Error(data.message || `HTTP错误: ${response.status}`);
+            }
+            const attachment = data.data;
+            if (!attachment || !attachment.id) {
+                throw new Error('附件上传响应无效');
+            }
+            this.pendingAttachments.push({
+                id: attachment.id,
+                fileName: attachment.fileName || file.name,
+                size: attachment.size || file.size
             });
-
-            if (!response.ok) {
-                throw new Error(`HTTP错误: ${response.status}`);
-            }
-
-            const data = await response.json();
-
-            if ((data.code === 200 || data.message === 'success') && data.data) {
-                // 在聊天界面显示上传成功消息
-                const successMessage = `${file.name} 上传到知识库成功`;
-                this.addMessage('assistant', successMessage, false, true);
-            } else {
-                throw new Error(data.message || '上传失败');
-            }
+            this.renderPendingAttachments();
         } catch (error) {
-            console.error('文件上传失败:', error);
-            this.showNotification('文件上传失败: ' + error.message, 'error');
+            console.error('附件上传失败:', error);
+            this.showNotification('附件上传失败: ' + error.message, 'error');
         } finally {
-            // 清空文件输入
-            if (this.fileInput) {
-                this.fileInput.value = '';
-            }
-            // 解锁前端
-            this.isStreaming = false;
-            this.showUploadOverlay(false);
+            this.isUploading = false;
             this.updateUI();
         }
+    }
+
+    renderPendingAttachments() {
+        if (!this.attachmentChips) {
+            return;
+        }
+        this.attachmentChips.innerHTML = '';
+        if (!this.pendingAttachments.length) {
+            this.attachmentChips.hidden = true;
+            return;
+        }
+        this.attachmentChips.hidden = false;
+        this.pendingAttachments.forEach(item => {
+            const chip = document.createElement('div');
+            chip.className = 'attachment-chip';
+            const name = document.createElement('span');
+            name.className = 'attachment-chip-name';
+            name.textContent = item.fileName;
+            name.title = item.fileName;
+            const removeBtn = document.createElement('button');
+            removeBtn.type = 'button';
+            removeBtn.className = 'attachment-chip-remove';
+            removeBtn.title = '移除附件';
+            removeBtn.textContent = '×';
+            removeBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.removePendingAttachment(item.id);
+            });
+            chip.appendChild(name);
+            chip.appendChild(removeBtn);
+            this.attachmentChips.appendChild(chip);
+        });
+    }
+
+    async removePendingAttachment(attachmentId) {
+        const kept = this.pendingAttachments.filter(item => item.id !== attachmentId);
+        this.pendingAttachments = kept;
+        this.renderPendingAttachments();
+        try {
+            await fetch(
+                `${this.apiBaseUrl}/chat/attachments/${encodeURIComponent(attachmentId)}?sessionId=${encodeURIComponent(this.sessionId)}`,
+                { method: 'DELETE' }
+            );
+        } catch (error) {
+            console.warn('移除服务端附件失败（已从输入框去掉）:', error);
+        }
+    }
+
+    clearPendingAttachments(deleteRemote) {
+        const ids = this.pendingAttachments.map(item => item.id);
+        this.pendingAttachments = [];
+        this.renderPendingAttachments();
+        if (!deleteRemote || !ids.length) {
+            return;
+        }
+        ids.forEach(id => {
+            fetch(
+                `${this.apiBaseUrl}/chat/attachments/${encodeURIComponent(id)}?sessionId=${encodeURIComponent(this.sessionId)}`,
+                { method: 'DELETE' }
+            ).catch(() => {});
+        });
     }
 
     // 格式化文件大小

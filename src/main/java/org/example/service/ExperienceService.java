@@ -31,13 +31,20 @@ import jakarta.annotation.PostConstruct;
 import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 经验服务
- * 负责：会话分级提炼为结构化经验、写入 Milvus（强）或 MySQL 临时表（弱）、三层过滤召回。
+ * 负责：会话分级提炼为结构化经验、写入 Milvus + experience_meta、三层过滤召回。
  * 可变的生命周期元数据（置信度/使用计数）存于 MySQL experience_meta，由 ExperienceLifecycleService 维护。
  */
 @Service
@@ -97,6 +104,9 @@ public class ExperienceService {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Gson gson = new Gson();
 
+    private static final Pattern EXP_ID_PATTERN = Pattern.compile(
+            "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+
     @PostConstruct
     public void init() {
         logger.info("经验服务初始化完成, enabled={}, distillModel=deepseek-v4-flash, recallTopK={}", enabled, recallTopK);
@@ -115,20 +125,21 @@ public class ExperienceService {
      * @param question   最新用户问题
      * @param answer     最新 AI 回复
      * @param manualMark 是否人工标记"有价值"（强制强触发）
+     * @return 写入或合并到的 expId；跳过或失败返回 null
      */
-    public void distillAndStore(String sessionId, String question, String answer, boolean manualMark) {
+    public String distillAndStore(String sessionId, String question, String answer, boolean manualMark) {
         if (!enabled) {
-            return;
+            return null;
         }
         if (!manualMark && !looksLikeOpsTroubleshooting(question, answer)) {
             logger.info("非运维排障对话，跳过经验提炼 - session={}", sessionId);
-            return;
+            return null;
         }
         try {
             String json = callLlmDistill(question, answer);
             if (json == null || json.isBlank()) {
                 logger.info("经验提炼无有效输出，跳过 - session={}", sessionId);
-                return;
+                return null;
             }
 
             JsonNode node;
@@ -137,55 +148,60 @@ public class ExperienceService {
             } catch (Exception parseEx) {
                 logger.warn("经验 JSON 解析失败，已跳过 - session={}, preview={}",
                         sessionId, preview(json, 400));
-                return;
+                return null;
             }
             double confidence = node.path("confidence").asDouble(0.0);
             String rootCause = node.path("root_cause").asText("");
             boolean resolved = node.path("resolved").asBoolean(false);
-            boolean transientIssue = node.path("transient").asBoolean(false);
 
             // 避免沉淀：低置信 / 无根因
             if (confidence < minConfidence || rootCause.isBlank()) {
                 logger.info("经验置信度低或无根因，丢弃 - confidence={}, hasRootCause={}", confidence, !rootCause.isBlank());
-                return;
+                return null;
             }
 
             String vectorText = buildVectorText(node);
             TopMatch top = findTopMatch(vectorText);
             boolean newPattern = top == null || top.cosScore < newPatternThreshold;
 
-            // 高相似 + 已闭环（或人工标记）：合并更新已有经验，而非新增一条近似重复
-            if (top != null && top.cosScore >= updateThreshold && (resolved || manualMark)) {
+            // 高相似 + 已闭环（或人工标记）：仅当故障模式一致时合并，避免 MySQL 宕机与连接打满被合成一条
+            if (top != null && top.cosScore >= updateThreshold && (resolved || manualMark)
+                    && isSameFailureMode(top.content, json)) {
                 mergeAndUpdate(top.expId, top.content, json, confidence);
                 logger.info("[更新] 与已有经验高度相似(cos={})，已合并更新 - expId={}",
                         String.format("%.2f", top.cosScore), top.expId);
-                return;
+                return top.expId;
+            }
+            if (top != null && top.cosScore >= updateThreshold) {
+                logger.info("高相似但故障模式不同，跳过合并 - existing={}, cos={}",
+                        top.expId, String.format("%.2f", top.cosScore));
             }
 
             // 避免沉淀：未解决且非新模式且非人工标记
             if (!manualMark && !resolved && !newPattern) {
                 logger.info("问题未解决且非新模式，丢弃经验 - session={}", sessionId);
-                return;
+                return null;
             }
 
             boolean metricConfirmed = verifyMetricRecovery(node);
-            String tier = decideTier(manualMark, newPattern, resolved, metricConfirmed);
+            String tier = decideTier(manualMark, resolved, metricConfirmed);
 
             String expId = UUID.randomUUID().toString();
             if ("strong".equals(tier)) {
                 storeToLongTerm(expId, vectorText, json, node, confidence, "strong");
-                logger.info("[强触发] 经验已沉淀至 Milvus - expId={}, newPattern={}, metricConfirmed={}",
-                        expId, newPattern, metricConfirmed);
+                logger.info("[强触发] 经验已沉淀至 Milvus - expId={}, metricConfirmed={}",
+                        expId, metricConfirmed);
             } else {
-                // 弱触发同样入 Milvus 参与召回，但置信度打折、tier=weak；
-                // 评分成功后可晋升为 strong，长期低置信则被衰减归档自动遗忘
+                // 新模式默认 weak：未验证的首次结论不进 strong，避免错主因占住召回
                 double weakConfidence = confidence * weakInitialFactor;
                 storeToLongTerm(expId, vectorText, json, node, weakConfidence, "weak");
                 logger.info("[弱触发] 经验已沉淀至 Milvus(tier=weak, confidence={}) - expId={}",
                         String.format("%.2f", weakConfidence), expId);
             }
+            return expId;
         } catch (Exception e) {
             logger.warn("经验提炼/沉淀失败（不影响主流程）- session={}: {}", sessionId, e.getMessage());
+            return null;
         }
     }
 
@@ -215,9 +231,10 @@ public class ExperienceService {
 
     /**
      * 决定经验等级：strong / weak。
+     * 新模式不再直接 strong，须人工标记或（已闭环且指标复核）才升强。
      */
-    private String decideTier(boolean manualMark, boolean newPattern, boolean resolved, boolean metricConfirmed) {
-        if (manualMark || newPattern || (resolved && metricConfirmed)) {
+    private String decideTier(boolean manualMark, boolean resolved, boolean metricConfirmed) {
+        if (manualMark || (resolved && metricConfirmed)) {
             return "strong";
         }
         return "weak";
@@ -315,16 +332,18 @@ public class ExperienceService {
 
     /**
      * 召回相关经验并格式化为提示词注入块；无命中返回空串。
+     * 会从 query 抽出环境提示做 L2 过滤。
      */
     public String recallForPrompt(String query) {
         if (!enabled) {
             return "";
         }
-        return formatExperienceBlock(recall(query, null));
+        return formatExperienceBlock(recall(query, extractEnvHint(query)));
     }
 
     /**
      * 把召回的经验列表格式化为提示词注入块；空列表返回空串。
+     * 展示的可信度 / tier 来自 MySQL experience_meta，覆盖 Milvus JSON 快照。
      */
     public String formatExperienceBlock(List<RecalledExperience> experiences) {
         if (experiences == null || experiences.isEmpty()) {
@@ -332,10 +351,14 @@ public class ExperienceService {
         }
         StringBuilder sb = new StringBuilder();
         sb.append("--- 相关历史经验（仅供参考，必须结合当前证据验证后再采纳，禁止直接照搬执行）---\n");
+        sb.append("可信度与等级以每条头部为准（来自生命周期元数据，不是 JSON 里的旧字段）。");
+        sb.append("若采纳某条，必须在回答中写明「采用经验: <expId>」。\n");
         int idx = 1;
         for (RecalledExperience exp : experiences) {
-            String tierTag = "weak".equals(exp.getTier()) ? "｜待验证" : "";
-            sb.append(String.format("【候选经验%d｜可信度%.2f%s】%s\n", idx++, exp.getFinalScore(), tierTag, exp.getContent()));
+            String tierTag = "weak".equals(exp.getTier()) ? "weak｜待验证" : "strong";
+            sb.append(String.format("【候选经验%d｜expId=%s｜可信度%.2f｜排序%.2f｜%s】%s\n",
+                    idx++, exp.getExpId(), exp.getConfidence(), exp.getFinalScore(),
+                    tierTag, overlayLifecycle(exp)));
         }
         sb.append("--- 历史经验结束 ---\n\n");
         return sb.toString();
@@ -384,11 +407,7 @@ public class ExperienceService {
 
             result.sort((a, b) -> Double.compare(b.getFinalScore(), a.getFinalScore()));
             List<RecalledExperience> top = result.size() > recallTopK ? result.subList(0, recallTopK) : result;
-
-            // 更新使用统计（命中即记一次使用）
-            for (RecalledExperience re : top) {
-                touchUsage(re.getExpId());
-            }
+            // 召回不等于被采纳：use_count / last_used 只在 markUsed 或评分反馈时更新
             return new ArrayList<>(top);
         } catch (Exception e) {
             logger.warn("经验召回失败（不影响主流程）: {}", e.getMessage());
@@ -397,25 +416,24 @@ public class ExperienceService {
     }
 
     /**
-     * L2 环境匹配：envHint 为空则放行；否则要求经验的环境/适用范围与提示存在交集。
+     * L2 环境匹配：从 hint 与经验正文抽出组件名（mysql/redis/…），两边都识别到时须有交集。
+     * 任一侧抽不出组件则放行，避免空 environment 的 Agent 记忆被误杀。
      */
     private boolean environmentMatches(String content, String envHint) {
-        if (envHint == null || envHint.isBlank()) {
+        Set<String> hintComps = extractCanonicalComponents(envHint);
+        if (hintComps.isEmpty()) {
             return true;
         }
-        try {
-            JsonNode node = objectMapper.readTree(content);
-            String scope = (node.path("environment").toString() + node.path("reusable_scope").toString()).toLowerCase();
-            String hint = envHint.toLowerCase();
-            for (String token : hint.split("[\\s,，、]+")) {
-                if (!token.isBlank() && scope.contains(token)) {
-                    return true;
-                }
-            }
-            return false;
-        } catch (Exception e) {
-            return true; // 解析失败时不因 L2 过滤丢弃
+        Set<String> expComps = extractCanonicalComponents(content);
+        if (expComps.isEmpty()) {
+            return true;
         }
+        for (String hint : hintComps) {
+            if (expComps.contains(hint)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ==================== 工具方法 ====================
@@ -557,11 +575,12 @@ public class ExperienceService {
     }
 
     /**
-     * 拼装用于向量化的症状导向文本。
+     * 拼装用于向量化的症状导向文本。带上告警名，降低不同故障模式挤在一起的概率。
      */
     private String buildVectorText(JsonNode node) {
         StringBuilder sb = new StringBuilder();
         sb.append(node.path("title").asText("")).append("\n");
+        sb.append("告警: ").append(node.path("alert_name").asText("")).append("\n");
         sb.append("症状: ").append(node.path("symptoms").toString()).append("\n");
         sb.append("根因: ").append(node.path("root_cause").asText(""));
         return sb.toString();
@@ -644,6 +663,234 @@ public class ExperienceService {
         }
         double decay = Math.pow(0.5, days / recencyHalfLifeDays);
         return recencyFloor + (1.0 - recencyFloor) * decay;
+    }
+
+    /**
+     * 仅在经验被回答/报告真正用上时调用：use_count+1，刷新 last_used。
+     */
+    public void markUsed(List<String> expIds) {
+        if (expIds == null) {
+            return;
+        }
+        for (String expId : expIds) {
+            touchUsage(expId);
+        }
+    }
+
+    /**
+     * 从回答或 AIOps 报告中挑出本次真正采纳的 expId（引用 UUID，或告警名+根因/标题命中）。
+     */
+    public List<String> selectAdoptedExpIds(String text, List<RecalledExperience> recalled) {
+        LinkedHashSet<String> adopted = new LinkedHashSet<>();
+        if (text == null || text.isBlank()) {
+            return new ArrayList<>();
+        }
+        Set<String> recalledIds = new HashSet<>();
+        if (recalled != null) {
+            for (RecalledExperience re : recalled) {
+                if (re.getExpId() != null) {
+                    recalledIds.add(re.getExpId());
+                }
+            }
+        }
+        Matcher matcher = EXP_ID_PATTERN.matcher(text);
+        while (matcher.find()) {
+            String id = matcher.group();
+            if (recalledIds.contains(id) || existsExpId(id)) {
+                adopted.add(id);
+            }
+        }
+        if (recalled != null) {
+            for (RecalledExperience re : recalled) {
+                if (adopted.contains(re.getExpId())) {
+                    continue;
+                }
+                if (matchesExperienceContent(text, re.getContent())) {
+                    adopted.add(re.getExpId());
+                }
+            }
+        }
+        return new ArrayList<>(adopted);
+    }
+
+    /**
+     * 从问句/告警快照抽出环境提示，供 L2 过滤。
+     */
+    public String extractEnvHint(String text) {
+        Set<String> comps = extractCanonicalComponents(text);
+        return comps.isEmpty() ? "" : String.join(" ", comps);
+    }
+
+    /**
+     * 把召回条目格式化为工具返回用的 JSON 节点（置信度/tier 覆盖为 meta 现值）。
+     */
+    public Map<String, Object> toMemoryItem(RecalledExperience re) {
+        Map<String, Object> item = new HashMap<>();
+        item.put("expId", re.getExpId());
+        item.put("tier", re.getTier());
+        item.put("confidence", re.getConfidence());
+        item.put("score", re.getFinalScore());
+        item.put("content", overlayLifecycle(re));
+        return item;
+    }
+
+    private boolean existsExpId(String expId) {
+        try {
+            Integer count = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM experience_meta WHERE exp_id = ?", Integer.class, expId);
+            return count != null && count > 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private boolean matchesExperienceContent(String text, String content) {
+        try {
+            JsonNode node = objectMapper.readTree(content);
+            String hay = text.toLowerCase(Locale.ROOT);
+            String alert = node.path("alert_name").asText("");
+            String title = node.path("title").asText("");
+            String root = node.path("root_cause").asText("");
+            boolean alertHit = !alert.isBlank() && hay.contains(alert.toLowerCase(Locale.ROOT));
+            boolean titleHit = title.length() >= 8 && hay.contains(title.toLowerCase(Locale.ROOT));
+            String rootFrag = root.length() > 12 ? root.substring(0, 12) : root;
+            boolean rootHit = rootFrag.length() >= 8 && hay.contains(rootFrag.toLowerCase(Locale.ROOT));
+            if (!alert.isBlank()) {
+                return alertHit && (titleHit || rootHit);
+            }
+            return titleHit || rootHit;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 用 meta 中的 expId / confidence / tier 覆盖展示用 JSON，避免模型看到过期快照。
+     */
+    public String overlayLifecycle(RecalledExperience exp) {
+        if (exp == null) {
+            return "";
+        }
+        try {
+            JsonNode parsed = objectMapper.readTree(exp.getContent() == null ? "{}" : exp.getContent());
+            ObjectNode node = parsed.isObject() ? (ObjectNode) parsed : objectMapper.createObjectNode();
+            node.put("exp_id", exp.getExpId());
+            node.put("confidence", round2(exp.getConfidence()));
+            node.put("tier", exp.getTier() == null ? "" : exp.getTier());
+            return objectMapper.writeValueAsString(node);
+        } catch (Exception e) {
+            return exp.getContent() == null ? "" : exp.getContent();
+        }
+    }
+
+    private double round2(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
+    /**
+     * 高相似仍可能是不同故障（MySQL 宕机 vs 连接打满）。告警名冲突或宕机/连接耗尽互斥则视为不同模式。
+     */
+    private boolean isSameFailureMode(String oldContent, String newJson) {
+        try {
+            JsonNode oldNode = objectMapper.readTree(oldContent);
+            JsonNode newNode = objectMapper.readTree(newJson);
+            String oldAlert = normalizeAlert(oldNode.path("alert_name").asText(""));
+            String newAlert = normalizeAlert(newNode.path("alert_name").asText(""));
+            if (!oldAlert.isEmpty() && !newAlert.isEmpty()
+                    && !oldAlert.equals(newAlert)
+                    && !oldAlert.contains(newAlert) && !newAlert.contains(oldAlert)) {
+                return false;
+            }
+            String oldBlob = failureBlob(oldNode);
+            String newBlob = failureBlob(newNode);
+            boolean oldDown = looksLikeProcessDown(oldBlob);
+            boolean newDown = looksLikeProcessDown(newBlob);
+            boolean oldConn = looksLikeConnectionExhaustion(oldBlob);
+            boolean newConn = looksLikeConnectionExhaustion(newBlob);
+            if ((oldDown && newConn) || (oldConn && newDown)) {
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private String normalizeAlert(String alert) {
+        return alert == null ? "" : alert.toLowerCase(Locale.ROOT).replaceAll("[\\s_\\-]", "");
+    }
+
+    private String failureBlob(JsonNode node) {
+        return (node.path("title").asText("") + " "
+                + node.path("alert_name").asText("") + " "
+                + node.path("root_cause").asText("") + " "
+                + node.path("symptoms").toString()).toLowerCase(Locale.ROOT);
+    }
+
+    private boolean looksLikeProcessDown(String blob) {
+        return blob.contains("mysqldown") || blob.contains("redisdown") || blob.contains("rabbitmqdown")
+                || blob.contains("宕机") || blob.contains("进程不存活") || blob.contains("容器被 stop")
+                || blob.contains("docker stop") || blob.contains("mysql_up == 0") || blob.contains("mysql_up==0");
+    }
+
+    private boolean looksLikeConnectionExhaustion(String blob) {
+        return blob.contains("too many connections") || blob.contains("max_connections")
+                || blob.contains("连接耗尽") || blob.contains("连接打满") || blob.contains("连接数过多")
+                || blob.contains("too-many-connections");
+    }
+
+    /**
+     * 从文本抽出规范组件名，供 L2 过滤。
+     */
+    private Set<String> extractCanonicalComponents(String text) {
+        Set<String> found = new LinkedHashSet<>();
+        if (text == null || text.isBlank()) {
+            return found;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (containsAny(lower, "mysql", "mysqld", "mysql_up", "mysqldown")) {
+            found.add("mysql");
+        }
+        if (containsAny(lower, "redis", "redisdown")) {
+            found.add("redis");
+        }
+        if (containsAny(lower, "rabbitmq", "rabbitmqdown", "rabbit") || hasWord(lower, "mq")) {
+            found.add("rabbitmq");
+        }
+        if (containsAny(lower, "course-service", "tj-course") || hasWord(lower, "course")) {
+            found.add("course");
+        }
+        if (containsAny(lower, "gateway")) {
+            found.add("gateway");
+        }
+        if (containsAny(lower, "nacos")) {
+            found.add("nacos");
+        }
+        if (containsAny(lower, "auth-service") || hasWord(lower, "auth")) {
+            found.add("auth");
+        }
+        if (containsAny(lower, "pay-service") || hasWord(lower, "pay")) {
+            found.add("pay");
+        }
+        return found;
+    }
+
+    private boolean containsAny(String hay, String... needles) {
+        for (String n : needles) {
+            if (hay.contains(n)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasWord(String hay, String word) {
+        for (String token : hay.split("[^a-z0-9\\u4e00-\\u9fff]+")) {
+            if (word.equals(token)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

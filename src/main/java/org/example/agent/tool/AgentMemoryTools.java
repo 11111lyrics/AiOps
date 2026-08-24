@@ -10,7 +10,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -69,17 +68,14 @@ public class AgentMemoryTools {
             @ToolParam(description = "Search query describing the knowledge or experience to look up")
             String query) {
         try {
-            List<ExperienceService.RecalledExperience> recalled = experienceService.recall(query, null);
+            List<ExperienceService.RecalledExperience> recalled =
+                    experienceService.recall(query, experienceService.extractEnvHint(query));
             if (recalled.isEmpty()) {
                 return "{\"status\": \"no_results\", \"message\": \"No relevant memories found.\"}";
             }
             List<Map<String, Object>> items = new ArrayList<>();
             for (ExperienceService.RecalledExperience re : recalled) {
-                Map<String, Object> item = new HashMap<>();
-                item.put("expId", re.getExpId());
-                item.put("content", re.getContent());
-                item.put("score", re.getFinalScore());
-                items.add(item);
+                items.add(experienceService.toMemoryItem(re));
             }
             return objectMapper.writeValueAsString(items);
         } catch (Exception e) {
