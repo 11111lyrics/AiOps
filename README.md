@@ -8,14 +8,17 @@
 
 ```
 前端
-  → ChatController
+  → ChatController / IncidentController
       /api/chat、/api/chat_stream     智能问答助手
-      /api/ai_ops                    一键告警分析
+      /api/ai_ops                    一键告警分析（编排段 A）
+      /api/incidents/{id}/approve    L2 同意，走执行段
+      /api/incidents/{id}/reject     L2 拒绝
+      /api/incidents/{id}/revise     L2 其他建议，从决策节点重选
       /api/upload、/api/docs/sync    知识库
       /api/chat/attachments          当轮附件（不入知识库）
   → Milvus：手册 / 经验 / 情景记忆
-  → MySQL：会话、滚动摘要、经验元数据
-  → Prometheus 告警、腾讯云 CLS 日志
+  → MySQL：会话、滚动摘要、经验元数据、incident 白板
+  → Prometheus 告警、腾讯云 CLS 日志、SSH playbook
 ```
 
 ---
@@ -174,27 +177,33 @@ LLM 抽不出根因或置信过低 → 丢弃
 
 ## 一键告警分析
 
-入口：`POST /api/ai_ops`（SSE，超时 10 分钟）。不需要用户输入问题。请求体只用可选的模型 `provider`。触发方式仍是手动一键（前端按钮 / 评测脚本），不接 Alertmanager webhook。
+入口：`POST /api/ai_ops`（SSE，超时 10 分钟）。不需要用户输入问题。请求体只用可选的模型 `provider`。触发方式仍是手动一键（前端按钮 / 评测脚本），不接 Alertmanager webhook。旧 `AiOpsService` 已删除，聊天入口委托 `AiOpsOrchestrationService`。
 
-编排是显式七节点流水线（详见 `docs/一键排障编排方案.md`），节点之间用类型化白板通信，**不用 A2A**：
+外层是 Workflow 状态图（三张 CompiledGraph，详见 `docs/一键排障编排方案.md`），节点之间用类型化白板通信，**不用 A2A**。内层 RCA 按 Plan-Execute，Supervisor 调度 Planner 拆解、Executor 调 Prometheus / CLS / 知识库。
 
 ```
-段 A（/api/ai_ops）
+段 A（POST /api/ai_ops）
   ① intake 拉 Prometheus 快照、拓扑归并、预召回经验
-  → ② rca Planner / Executor / Supervisor 规划→执行→再规划（Prometheus / CLS / 知识库）写出《告警分析报告》+ JSON 结论
-  → ③ plan 从 playbook 目录选处置并 SSH 前置检查
-  → ④ risk 按 L0/L1/L2 分级
-      L0/L1 → ⑤ execute → ⑥ verify → ⑦ distill
-      无计划 / 熔断 → ⑦ distill
-      L2 → 结束，incident 落库为 PENDING_APPROVAL
+  → ② rca 内层 Plan-Execute（或 ReactAgent）写出《告警分析报告》+ JSON 结论
+  → ③ decide LLM 只能从 playbook 目录选一条，并填写 {param}（须在 choices 内）
+  → ④ plan 模板落地命令、SSH 前置检查、生成 dry-run 说明书
+  → ⑤ risk 按 L0/L1/L2 分级
+      L0/L1 AUTO → ⑥ execute → ⑦ verify → ⑧ distill
+      无计划 / 熔断 / 前置失败 NO_ACTION → ⑧ distill
+      L2 PENDING → 结束，incident 落库，前端出审批卡
 
-段 B（POST /api/incidents/{id}/approve）
-  从 state_json 读回白板 → ⑤ execute → ⑥ verify → ⑦ distill
+段 B（POST /api/incidents/{id}/approve 同意）
+  从 state_json 读回白板 → ⑥ execute → ⑦ verify → ⑧ distill
+
+段 Revise（POST /api/incidents/{id}/revise 其他建议）
+  人工意见写入白板 → 从 ③ decide 重选（最多 max-replans 次）→ ④ plan → ⑤ risk → …
+
+拒绝：POST /api/incidents/{id}/reject，状态 REJECTED，不执行
 ```
 
-LLM 只出现在 ② 根因分析和 ⑦ 经验提炼；其余节点是确定性 Java。② 的引擎由 `aiops.orchestration.rca.engine` 决定：`plan-execute`（默认，Supervisor 内层图对外层七节点图是黑盒，不共用白板）或 `react`（单个 ReactAgent）。两种引擎产物一致：报告正文 + 尾部 ```json 结论；结论缺失时再用一次无工具 LLM 调用从报告抽取，仍失败则只按告警名 / 关键词兜底选 playbook 并按 L2 处理。RCA 有墙钟超时（默认 480s）与 SSE 心跳。自愈命令只能来自 `aiops.orchestration.playbooks`，不能自由生成。`remediation.enabled=false` 时全流程 dry-run，不连 SSH。
+LLM 出现在 ② 根因分析、③ 处置决策、⑧ 经验提炼；其余节点是确定性 Java。② 的引擎由 `aiops.orchestration.rca.engine` 决定：`plan-execute`（默认，Supervisor 内层图对外层是黑盒，不共用白板）或 `react`（单个 ReactAgent）。两种引擎产物一致：报告正文 + 尾部 JSON 结论；结论缺失时再用一次无工具 LLM 从报告抽取。自愈命令只能来自 `aiops.orchestration.playbooks` 模板，禁止自由生成；占位符写成 `{name}`，避免和 docker `{{.State.Status}}` 冲突。决策失败才回退告警名 / 关键词查表。`remediation.enabled=false` 时全流程 dry-run，不连 SSH。RCA 有墙钟超时（默认 480s）与 SSE 心跳。
 
-SSE 仍推 `content / done / error`（评测脚本不用改）。额外类型：`stage`（节点进度）、`approval`（待审批卡）、`incident`（终态）。L2 在前端渲染审批卡，批准后走段 B。
+SSE 仍推 `content / done / error`（评测脚本不用改）。额外类型：`stage`（节点进度）、`approval`（待审批卡）、`incident`（终态）。L2 审批卡三选：**同意执行** / **拒绝执行** / **其他建议**。
 
 ### 失败兜底
 
@@ -204,8 +213,11 @@ SSE 仍推 `content / done / error`（评测脚本不用改）。额外类型：
 | 拉告警失败或没有 firing 名 | 用兜底词做经验召回；RCA 改查 CLS 是否有 Too many connections 等未覆盖故障 |
 | 工具连不上 Prometheus | 不得写成「当前无告警」；有 firing 时以启动时快照继续排查 |
 | CLS 查到 0 条 | 不等于业务无故障，禁止编造日志 |
-| RCA 没附上 JSON 结论 | 仍输出 Markdown 报告，不自愈 |
+| RCA 没附上 JSON 结论 | 仍输出 Markdown 报告；决策失败则回退查表，仍无则不自愈 |
+| 决策 LLM 失败或目录无匹配 | 回退告警名 / 关键词查表；仍无则 `NO_ACTION` |
 | 前置检查失败 / 熔断 | `NO_ACTION`，只出报告 |
+| 其他建议无法用现有 playbook 落地 | `no_action`，只出报告 |
+| 重选次数超过 `max-replans` | 停止重规划 |
 | 报告对不上当前 firing 告警名 | 对已采纳经验负反馈，**不再沉淀** |
 | 编排抛错 | incident 记 `FAILED`，SSE `error` |
 
@@ -263,8 +275,8 @@ cp src/main/resources/mcp-servers.json.example src/main/resources/mcp-servers.js
 Agent 本机 `127.0.0.1:9900`。经验库 / Milvus 在本机虚机。Prometheus 对准远端 tjxt（先开 SSH 隧道），不要用本机 `192.168.150.101:9090`。`spring.ai.model.chat: none`，对话模型由 `ChatModelFactory` 按请求创建。
 
 ```
-controller/          对外接口（含 /api/ai_ops、/api/incidents）
-aiops/               一键排障七节点编排、白板、SSH playbook
+controller/          对外接口（含 /api/ai_ops、/api/incidents 审批三选）
+aiops/               状态图、RCA Plan-Execute、决策 LLM、风险门、SSH、验证、沉淀
 service/             对话、记忆、经验、向量、文档解析
 agent/tool/          本地工具（含 loadSkill）
 resources/skills/    按需加载的手册
