@@ -14,12 +14,14 @@
 
 ## 基础设施
 
-| 组件 | 地址 | 用途 |
-|------|------|------|
-| Prometheus | http://192.168.150.101:9090 | 告警与指标 |
-| MySQL | 192.168.150.101:3306 | 业务数据库 |
-| Milvus | 192.168.150.101:19530 | RAG 向量库 |
-| 日志采集机 | 192.168.150.101 | LogListener + 微服务部署 |
+两边虚机 NAT 都是 `192.168.150.101`，**只在各自宿主机上有效**。本机 Windows 上的 Agent 访问 `192.168.150.101` 只会打到本机经验库虚机（含误装的 Prometheus、Milvus、经验库 MySQL），到不了远端 tjxt。
+
+| 组件 | 从本机 Agent 访问 | 虚机内部 / Nacos | 说明 |
+|------|-------------------|------------------|------|
+| Prometheus | http://10.195.86.203:9090 | 远端虚机 :9090 | 必须走远端映射；不要用本机 :9090 |
+| tjxt MySQL | 走远端宿主机映射（SSH `10.195.86.203:10023`） | 192.168.150.101:3306 | 告警 instance / `tj.jdbc.host` |
+| Milvus | 192.168.150.101:19530 | 本机经验库虚机 | **不在 tjxt** |
+| 日志采集 | CLS（远端 tjxt 上的 LogListener） | 远端虚机 192.168.150.101 | 采集机不是本机那台 |
 
 ## 全量日志主题（ap-chengdu）
 
@@ -39,6 +41,7 @@
 | data-service | tjxt-dev-data-service-log-ap-chengdu | 数据统计异常 |
 | promotion-service | tjxt-dev-promotion-service-log-ap-chengdu | 营销活动错误 |
 | remark-service | tjxt-dev-remark-service-log-ap-chengdu | 评论/评价异常 |
+| mysql-slow | tjxt-dev-mysql-slow-log-ap-chengdu | MySQLSlowQueries，定位慢 SQL |
 
 ## 标准排查流程
 

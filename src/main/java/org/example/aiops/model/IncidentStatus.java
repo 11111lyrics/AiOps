@@ -1,0 +1,19 @@
+package org.example.aiops.model;
+
+/**
+ * incident 状态机。
+ * ANALYZING → PENDING_APPROVAL | EXECUTING | NO_ACTION | FAILED
+ * PENDING_APPROVAL → EXECUTING | REJECTED | ANALYZING（其他建议重选）
+ * EXECUTING → VERIFYING → RESOLVED | UNVERIFIED
+ */
+public enum IncidentStatus {
+    ANALYZING,
+    PENDING_APPROVAL,
+    EXECUTING,
+    VERIFYING,
+    RESOLVED,
+    UNVERIFIED,
+    NO_ACTION,
+    REJECTED,
+    FAILED
+}

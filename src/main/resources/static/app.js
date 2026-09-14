@@ -1375,126 +1375,247 @@ class SuperBizAgentApp {
                 throw new Error(`HTTP错误: ${response.status}`);
             }
 
-            let fullResponse = '';
+            await this.consumeAiOpsSse(response, loadingMessageElement);
+        } catch (error) {
+            throw error;
+        }
+    }
 
-            // 处理 SSE 流式响应
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = '';
-            let currentEvent = 'message'; // 默认事件类型为 message
+    async consumeAiOpsSse(response, loadingMessageElement) {
+        let fullResponse = '';
+        const stages = [];
+        let pendingApproval = null;
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let currentEvent = 'message';
 
-            try {
-                while (true) {
-                    const { done, value } = await reader.read();
-                    
-                    if (done) {
-                        // 流结束，更新最终内容
-                        if (fullResponse) {
-                            console.log('AI Ops 流结束，更新最终内容，长度:', fullResponse.length);
-                            this.updateAIOpsMessage(loadingMessageElement, fullResponse, []);
-                        }
-                        break;
+        const handle = (sseMessage) => {
+            if (!sseMessage || !sseMessage.type) {
+                return false;
+            }
+            if (sseMessage.type === 'content') {
+                fullResponse += sseMessage.data || '';
+                if (loadingMessageElement) {
+                    this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
+                }
+                return false;
+            }
+            if (sseMessage.type === 'stage') {
+                const payload = this.parseJsonData(sseMessage.data);
+                if (payload && payload.message) {
+                    stages.push(payload.message);
+                    if (loadingMessageElement) {
+                        this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
                     }
+                }
+                return false;
+            }
+            if (sseMessage.type === 'approval') {
+                pendingApproval = this.parseJsonData(sseMessage.data);
+                return false;
+            }
+            if (sseMessage.type === 'incident') {
+                return false;
+            }
+            if (sseMessage.type === 'done') {
+                this.finishAiOpsMessage(loadingMessageElement, fullResponse, stages, pendingApproval);
+                return true;
+            }
+            if (sseMessage.type === 'error') {
+                throw new Error(sseMessage.data || '智能运维分析失败');
+            }
+            return false;
+        };
 
-                    // 解码数据并添加到缓冲区
-                    buffer += decoder.decode(value, { stream: true });
-                    
-                    // 按行分割处理
-                    const lines = buffer.split('\n');
-                    // 保留最后一行（可能不完整）
-                    buffer = lines.pop() || '';
-                    
-                    for (const line of lines) {
-                        if (line.trim() === '') continue;
-                        
-                        console.log('[AI Ops SSE] 收到行:', line);
-                        
-                        // 解析 SSE 格式
-                        if (line.startsWith('id:')) {
-                            continue;
-                        } else if (line.startsWith('event:')) {
-                            currentEvent = line.substring(6).trim();
-                            console.log('[AI Ops SSE] 事件类型:', currentEvent);
-                            continue;
-                        } else if (line.startsWith('data:')) {
-                            const rawData = line.substring(5).trim();
-                            console.log('[AI Ops SSE] 数据:', rawData, ', currentEvent:', currentEvent);
-                            
-                            // 解析可能包含多个JSON对象的数据
-                            const processJsonMessages = (data) => {
-                                const jsonPattern = /\{"type"\s*:\s*"[^"]+"\s*,\s*"data"\s*:\s*(?:"[^"]*"|null)\}/g;
-                                const matches = data.match(jsonPattern);
-                                
-                                if (matches && matches.length > 0) {
-                                    console.log('[AI Ops SSE] 匹配到', matches.length, '个JSON对象');
-                                    for (const jsonStr of matches) {
-                                        try {
-                                            const sseMessage = JSON.parse(jsonStr);
-                                            if (sseMessage.type === 'content') {
-                                                fullResponse += sseMessage.data || '';
-                                            } else if (sseMessage.type === 'done') {
-                                                console.log('AI Ops 流完成，最终内容长度:', fullResponse.length);
-                                                this.updateAIOpsMessage(loadingMessageElement, fullResponse, []);
-                                                return true;
-                                            } else if (sseMessage.type === 'error') {
-                                                throw new Error(sseMessage.data || '智能运维分析失败');
-                                            }
-                                        } catch (e) {
-                                            if (e.message.includes('智能运维')) throw e;
-                                            console.log('[AI Ops SSE] 单个JSON解析失败:', jsonStr);
-                                        }
-                                    }
-                                    if (loadingMessageElement) {
-                                        this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
-                                    }
-                                    return false;
-                                }
-                                return null;
-                            };
-                            
-                            const result = processJsonMessages(rawData);
-                            if (result === true) {
-                                return; // 流结束
-                            } else if (result === null) {
-                                // 没有匹配到多个JSON，尝试单个JSON解析
-                                try {
-                                    const sseMessage = JSON.parse(rawData);
-                                    if (sseMessage && sseMessage.type) {
-                                        if (sseMessage.type === 'content') {
-                                            fullResponse += sseMessage.data || '';
-                                            if (loadingMessageElement) {
-                                                this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
-                                            }
-                                        } else if (sseMessage.type === 'done') {
-                                            console.log('AI Ops 流完成，最终内容长度:', fullResponse.length);
-                                            this.updateAIOpsMessage(loadingMessageElement, fullResponse, []);
-                                            return;
-                                        } else if (sseMessage.type === 'error') {
-                                            throw new Error(sseMessage.data || '智能运维分析失败');
-                                        }
-                                    } else {
-                                        fullResponse += rawData;
-                                        if (loadingMessageElement) {
-                                            this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
-                                        }
-                                    }
-                                } catch (e) {
-                                    if (e.message.includes('智能运维')) throw e;
-                                    // 非 JSON 格式，直接追加原始数据
-                                    fullResponse += rawData;
-                                    if (loadingMessageElement) {
-                                        this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
-                                    }
-                                }
-                            }
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+                for (const line of lines) {
+                    if (line.trim() === '' || line.startsWith('id:')) {
+                        continue;
+                    }
+                    if (line.startsWith('event:')) {
+                        currentEvent = line.substring(6).trim();
+                        continue;
+                    }
+                    if (!line.startsWith('data:')) {
+                        continue;
+                    }
+                    const rawData = line.substring(5).trim();
+                    try {
+                        const sseMessage = JSON.parse(rawData);
+                        if (handle(sseMessage)) {
+                            return;
+                        }
+                    } catch (e) {
+                        if (e.message.includes('智能运维')) {
+                            throw e;
+                        }
+                        fullResponse += rawData;
+                        if (loadingMessageElement) {
+                            this.updateAIOpsStreamContent(loadingMessageElement, fullResponse);
                         }
                     }
                 }
-            } finally {
-                reader.releaseLock();
             }
+            this.finishAiOpsMessage(loadingMessageElement, fullResponse, stages, pendingApproval);
+        } finally {
+            reader.releaseLock();
+        }
+    }
+
+    parseJsonData(data) {
+        if (!data) {
+            return null;
+        }
+        if (typeof data === 'object') {
+            return data;
+        }
+        try {
+            return JSON.parse(data);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    finishAiOpsMessage(loadingMessageElement, fullResponse, stages, pendingApproval) {
+        const el = this.updateAIOpsMessage(loadingMessageElement, fullResponse, stages || []);
+        if (pendingApproval && el) {
+            this.renderApprovalCard(el, pendingApproval);
+        }
+    }
+
+    renderApprovalCard(messageElement, payload) {
+        const wrapper = messageElement.querySelector('.message-content-wrapper');
+        if (!wrapper) {
+            return;
+        }
+        const plan = payload.plan || {};
+        const params = plan.params && typeof plan.params === 'object'
+            ? Object.entries(plan.params).map(([k, v]) => `${k}=${v}`).join('，')
+            : '';
+        const card = document.createElement('div');
+        card.className = 'approval-card';
+        card.innerHTML = `
+            <div class="approval-card-title">待审批自愈 · ${this.escapeHtml(payload.riskLevel || 'L2')}（风险分 ${this.escapeHtml(String(payload.score ?? ''))}）</div>
+            <div class="approval-card-body">
+                <p><strong>${this.escapeHtml(plan.title || plan.playbookId || '')}</strong> → ${this.escapeHtml(plan.target || '')}</p>
+                ${params ? `<p>参数：${this.escapeHtml(params)}</p>` : ''}
+                <pre class="approval-commands">${this.escapeHtml((plan.commands || []).join('\n'))}</pre>
+                <p>回滚：${this.escapeHtml(plan.rollback || '-')}</p>
+                <p>预期：${this.escapeHtml(plan.expectedEffect || '-')}</p>
+                ${plan.decisionReason ? `<p>决策：${this.escapeHtml(plan.decisionReason)}</p>` : ''}
+                ${plan.humanSuggestion ? `<p>上次建议：${this.escapeHtml(plan.humanSuggestion)}</p>` : ''}
+                <p class="approval-reasons">${this.escapeHtml((payload.reasons || []).join('；'))}</p>
+            </div>
+            <div class="approval-actions">
+                <button type="button" class="approval-btn approve">同意执行</button>
+                <button type="button" class="approval-btn reject">拒绝执行</button>
+                <button type="button" class="approval-btn suggest">其他建议</button>
+            </div>
+            <div class="approval-suggest" hidden>
+                <textarea class="approval-suggest-input" rows="3" placeholder="说明希望改选哪条命令或更换哪些参数，例如：改用订单表 user_id 索引 / 把 max_connections 调到 800"></textarea>
+                <button type="button" class="approval-btn approve suggest-submit">提交建议并重选</button>
+            </div>
+        `;
+        wrapper.appendChild(card);
+        card.querySelector('.approve').addEventListener('click', () => this.approveIncident(payload.incidentId, card, messageElement));
+        card.querySelector('.reject').addEventListener('click', () => this.rejectIncident(payload.incidentId, card));
+        card.querySelector('.suggest').addEventListener('click', () => {
+            const box = card.querySelector('.approval-suggest');
+            box.hidden = !box.hidden;
+        });
+        card.querySelector('.suggest-submit').addEventListener('click', () => {
+            const text = (card.querySelector('.approval-suggest-input').value || '').trim();
+            if (!text) {
+                this.showNotification('请先输入其他建议', 'warning');
+                return;
+            }
+            this.reviseIncident(payload.incidentId, text, card, messageElement);
+        });
+    }
+
+    async approveIncident(incidentId, card, messageElement) {
+        if (this.isStreaming) {
+            this.showNotification('请等待当前操作完成', 'warning');
+            return;
+        }
+        this.isStreaming = true;
+        this.updateUI();
+        try {
+            card.querySelectorAll('button').forEach(btn => { btn.disabled = true; });
+            const response = await fetch(`${this.apiBaseUrl}/incidents/${encodeURIComponent(incidentId)}/approve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ approver: 'ui', comment: '前端批准' })
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP错误: ${response.status}`);
+            }
+            card.classList.add('approval-done');
+            card.querySelector('.approval-card-title').textContent = '已同意，正在执行…';
+            await this.consumeAiOpsSse(response, messageElement);
         } catch (error) {
-            throw error;
+            this.showNotification('批准执行失败：' + error.message, 'error');
+            card.querySelectorAll('button').forEach(btn => { btn.disabled = false; });
+        } finally {
+            this.isStreaming = false;
+            this.updateUI();
+        }
+    }
+
+    async reviseIncident(incidentId, suggestion, card, messageElement) {
+        if (this.isStreaming) {
+            this.showNotification('请等待当前操作完成', 'warning');
+            return;
+        }
+        this.isStreaming = true;
+        this.updateUI();
+        try {
+            card.querySelectorAll('button').forEach(btn => { btn.disabled = true; });
+            const response = await fetch(`${this.apiBaseUrl}/incidents/${encodeURIComponent(incidentId)}/revise`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ approver: 'ui', suggestion })
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP错误: ${response.status}`);
+            }
+            card.classList.add('approval-revised');
+            card.querySelector('.approval-card-title').textContent = '已提交建议，正在重选命令…';
+            await this.consumeAiOpsSse(response, messageElement);
+        } catch (error) {
+            this.showNotification('按建议重选失败：' + error.message, 'error');
+            card.querySelectorAll('button').forEach(btn => { btn.disabled = false; });
+        } finally {
+            this.isStreaming = false;
+            this.updateUI();
+        }
+    }
+
+    async rejectIncident(incidentId, card) {
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/incidents/${encodeURIComponent(incidentId)}/reject`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ approver: 'ui', comment: '前端拒绝' })
+            });
+            const body = await response.json();
+            if (body.code !== 200) {
+                throw new Error(body.message || '拒绝失败');
+            }
+            card.classList.add('approval-rejected');
+            card.querySelectorAll('button').forEach(btn => { btn.disabled = true; });
+            card.querySelector('.approval-card-title').textContent = '已拒绝执行';
+        } catch (error) {
+            this.showNotification('拒绝失败：' + error.message, 'error');
         }
     }
 

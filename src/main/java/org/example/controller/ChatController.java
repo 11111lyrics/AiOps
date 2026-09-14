@@ -1,16 +1,14 @@
 package org.example.controller;
 
 import com.alibaba.cloud.ai.graph.NodeOutput;
-import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.agent.ReactAgent;
 import com.alibaba.cloud.ai.graph.streaming.OutputType;
 import com.alibaba.cloud.ai.graph.streaming.StreamingOutput;
 import lombok.Getter;
 import lombok.Setter;
-import org.example.agent.tool.QueryMetricsTools;
+import org.example.aiops.AiOpsOrchestrationService;
 import org.example.config.ChatModelFactory;
 import org.example.dto.ChatAttachment;
-import org.example.service.AiOpsService;
 import org.example.service.ChatAttachmentService;
 import org.example.service.ChatMemoryService;
 import org.example.service.ChatService;
@@ -22,8 +20,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.tool.ToolCallback;
-import org.springframework.ai.tool.ToolCallbackProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -49,8 +45,8 @@ public class ChatController {
     private static final Logger logger = LoggerFactory.getLogger(ChatController.class);
 
     @Autowired
-    private AiOpsService aiOpsService;
-    
+    private AiOpsOrchestrationService aiOpsOrchestrationService;
+
     @Autowired
     private ChatService chatService;
 
@@ -71,12 +67,6 @@ public class ChatController {
 
     @Autowired
     private ExperienceLifecycleService experienceLifecycleService;
-
-    @Autowired
-    private QueryMetricsTools queryMetricsTools;
-
-    @Autowired
-    private ToolCallbackProvider tools;
 
     @Autowired
     private ChatModelFactory chatModelFactory;
@@ -344,106 +334,25 @@ public class ChatController {
     }
 
     /**
-     * AI 智能运维接口（SSE 流式模式）- 自动分析告警并生成运维报告
-     * 无需用户输入，自动执行告警分析流程
+     * AI 智能运维接口（SSE）：段 A。L0/L1 同请求内自愈；L2 推 approval 后结束，
+     * 等 /api/incidents/{id}/approve（同意）、/reject（拒绝）或 /revise（其他建议后重选）。
      */
     @PostMapping(value = "/ai_ops", produces = "text/event-stream;charset=UTF-8")
     public SseEmitter aiOps(@RequestBody(required = false) ChatRequest request) {
-        SseEmitter emitter = new SseEmitter(600000L); // 10分钟超时（告警分析可能较慢）
+        SseEmitter emitter = new SseEmitter(600000L);
         String provider = request != null ? request.getProvider() : null;
 
         executor.execute(() -> {
+            String incidentId = null;
             try {
-                logger.info("收到 AI 智能运维请求 - provider={}, 启动多 Agent 协作流程", provider);
-
-                ChatModel chatModel = chatModelFactory.create(provider, 0.3, 8000, 0.9);
-
-                ToolCallback[] toolCallbacks = tools.getToolCallbacks();
-
-                emitter.send(SseEmitter.event().name("message").data(SseMessage.content("正在读取告警并拆解任务...\n")));
-
-                String alertsSnapshot = queryMetricsTools.queryPrometheusAlerts();
-                List<String> firingNames = queryMetricsTools.extractFiringNames(alertsSnapshot);
-                String opsRecallQuery = queryMetricsTools.toExperienceRecallQuery(alertsSnapshot);
-                logger.info("一键排障召回查询 firing={}, query={}", firingNames, opsRecallQuery);
-                List<ExperienceService.RecalledExperience> recalled =
-                        experienceService.recall(opsRecallQuery, experienceService.extractEnvHint(opsRecallQuery));
-                String experienceBlock = experienceService.formatExperienceBlock(recalled);
-
-                Optional<OverAllState> overAllStateOptional =
-                        aiOpsService.executeAiOpsAnalysis(chatModel, toolCallbacks, experienceBlock, alertsSnapshot);
-
-                if (overAllStateOptional.isEmpty()) {
-                    // 没有产出则经验未被采纳，不再对全部召回条目负反馈
-                    logger.warn("多 Agent 编排未获取到有效结果，跳过经验评分");
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.error("多 Agent 编排未获取到有效结果"), MediaType.APPLICATION_JSON));
-                    emitter.complete();
-                    return;
-                }
-
-                OverAllState state = overAllStateOptional.get();
-                logger.info("AI Ops 编排完成，开始提取最终报告...");
-
-                // 提取最终报告
-                Optional<String> finalReportOptional = aiOpsService.extractFinalReport(state);
-
-                // 输出最终报告
-                if (finalReportOptional.isPresent()) {
-                    String finalReportText = finalReportOptional.get();
-                    logger.info("提取到 Planner 最终报告，长度: {}", finalReportText.length());
-                    
-                    // 发送分隔线
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("\n\n" + "=".repeat(60) + "\n"), MediaType.APPLICATION_JSON));
-                    
-                    // 发送完整的告警分析报告
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("📋 **告警分析报告**\n\n"), MediaType.APPLICATION_JSON));
-                    
-                    int chunkSize = 50;
-                    for (int i = 0; i < finalReportText.length(); i += chunkSize) {
-                        int end = Math.min(i + chunkSize, finalReportText.length());
-                        String chunk = finalReportText.substring(i, end);
-                        
-                        emitter.send(SseEmitter.event().name("message")
-                                .data(SseMessage.content(chunk), MediaType.APPLICATION_JSON));
-                    }
-                    
-                    // 发送结束分隔线
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("\n" + "=".repeat(60) + "\n\n"), MediaType.APPLICATION_JSON));
-                    
-                    logger.info("最终报告已完整输出");
-
-                    final String reportForDistill = finalReportText;
-                    boolean grounded = firingNames.isEmpty()
-                            || firingNames.stream().anyMatch(name ->
-                            name != null && !name.isBlank() && reportForDistill.contains(name));
-                    executor.execute(() -> {
-                        List<String> adopted = experienceService.selectAdoptedExpIds(reportForDistill, recalled);
-                        if (!grounded) {
-                            logger.warn("一键排障报告未覆盖当前 firing 告警 {}，对已采纳经验负反馈 adopted={}",
-                                    firingNames, adopted);
-                            applyAdoptedFeedback(adopted, false);
-                            return;
-                        }
-                        applyAdoptedFeedback(adopted, true);
-                        experienceService.distillAndStore("aiops-" + System.currentTimeMillis(),
-                                "自动告警分析任务", reportForDistill, false);
-                    });
-                } else {
-                    logger.warn("未能提取到 Planner 最终报告，跳过经验评分");
-                    emitter.send(SseEmitter.event().name("message")
-                            .data(SseMessage.content("⚠️ 多 Agent 流程已完成，但未能生成最终报告。"), MediaType.APPLICATION_JSON));
-                }
-
-                emitter.send(SseEmitter.event().name("message").data(SseMessage.done(), MediaType.APPLICATION_JSON));
+                logger.info("收到 AI 智能运维请求 - provider={}", provider);
+                incidentId = aiOpsOrchestrationService.start(provider, IncidentController.sseSink(emitter));
+                emitter.send(SseEmitter.event().name("message")
+                        .data(SseMessage.done(incidentId), MediaType.APPLICATION_JSON));
                 emitter.complete();
-                logger.info("AI Ops 多 Agent 编排完成");
-
+                logger.info("AI Ops 段 A 完成 incident={}", incidentId);
             } catch (Exception e) {
-                logger.error("AI Ops 多 Agent 协作失败", e);
+                logger.error("AI Ops 编排失败 incident={}", incidentId, e);
                 try {
                     emitter.send(SseEmitter.event().name("message")
                             .data(SseMessage.error("AI Ops 流程失败: " + e.getMessage()), MediaType.APPLICATION_JSON));
@@ -477,18 +386,6 @@ public class ChatController {
         } catch (Exception e) {
             logger.warn("聊天经验闭环失败（不影响主流程）- session={}: {}", sessionId, e.getMessage());
         }
-    }
-
-    /**
-     * 只对采纳的经验记使用并回写评分；未引用则不动元数据。
-     */
-    private void applyAdoptedFeedback(List<String> adopted, boolean success) {
-        if (adopted == null || adopted.isEmpty()) {
-            logger.info("本次无被采纳的历史经验，跳过评分回写 success={}", success);
-            return;
-        }
-        experienceService.markUsed(adopted);
-        experienceLifecycleService.feedbackBatch(adopted, success);
     }
 
     /**
@@ -688,6 +585,13 @@ public class ChatController {
             SseMessage message = new SseMessage();
             message.setType("done");
             message.setData(sessionId);
+            return message;
+        }
+
+        public static SseMessage of(String type, String data) {
+            SseMessage message = new SseMessage();
+            message.setType(type);
+            message.setData(data);
             return message;
         }
     }

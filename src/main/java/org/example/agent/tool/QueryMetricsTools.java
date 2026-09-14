@@ -178,7 +178,7 @@ public class QueryMetricsTools {
         for (int i = 1; i <= FETCH_RETRIES; i++) {
             logger.debug("请求 Prometheus API ({}/{}): {}", i, FETCH_RETRIES, apiUrl);
             try {
-                return getAlertsOnce(apiUrl);
+                return objectMapper.readValue(httpGetJson(apiUrl), PrometheusAlertsResult.class);
             } catch (Exception e) {
                 last = e;
                 logger.warn("查询 Prometheus 告警失败 ({}/{}): {}", i, FETCH_RETRIES, e.getMessage());
@@ -195,7 +195,7 @@ public class QueryMetricsTools {
         throw last != null ? last : new RuntimeException("查询 Prometheus 告警失败");
     }
 
-    private PrometheusAlertsResult getAlertsOnce(String apiUrl) throws Exception {
+    private String httpGetJson(String apiUrl) throws Exception {
         HttpURLConnection conn = (HttpURLConnection) URI.create(apiUrl).toURL().openConnection();
         conn.setRequestMethod("GET");
         conn.setConnectTimeout(timeout * 1000);
@@ -211,12 +211,12 @@ public class QueryMetricsTools {
             InputStream stream = code >= 200 && code < 300 ? conn.getInputStream() : conn.getErrorStream();
             String body = stream == null ? "" : new String(stream.readAllBytes(), StandardCharsets.UTF_8);
             if (code < 200 || code >= 300) {
-                throw new RuntimeException("HTTP 请求失败: " + code);
+                throw new RuntimeException("HTTP 请求失败: " + code + (body.isBlank() ? "" : " " + body));
             }
             if (body.isBlank()) {
                 throw new RuntimeException("Prometheus 返回空响应体");
             }
-            return objectMapper.readValue(body, PrometheusAlertsResult.class);
+            return body;
         } finally {
             conn.disconnect();
         }

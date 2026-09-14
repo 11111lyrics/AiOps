@@ -70,11 +70,12 @@ public class ChatService {
         systemPromptBuilder.append("当用户询问时间相关问题时，使用 getCurrentDateTime 工具。\n");
         systemPromptBuilder.append("当用户需要查询公司内部文档、流程、最佳实践或技术指南时，使用 queryInternalDocs 工具。\n");
         systemPromptBuilder.append("当用户需要查询 Prometheus 告警、监控指标或系统告警状态时，使用 queryPrometheusAlerts 工具。\n");
+        systemPromptBuilder.append("定位 MySQL 慢 SQL 时：先用 queryPrometheusAlerts 看是否有 MySQLSlowQueries，再按 cls-log-query 查 CLS 主题 mysql-slow（Query_time / Rows_examined / SELECT），不要 SSH 查库。\n");
         systemPromptBuilder.append("当用户提及\"之前/上次/以前\"处理过的问题，或需要回忆更早的历史会话内容时，使用 searchPastConversations 工具检索历史对话记录。\n");
         systemPromptBuilder.append("当用户明确要求你\"记住\"某个结论/规则，或你在对话中确认了一条重要的可复用经验（如排障规律、环境事实、运维约定）时，使用 saveMemory 工具主动保存到长期记忆；不要保存寒暄或未经验证的猜测。\n");
         systemPromptBuilder.append("当自动注入的历史经验不足、你需要主动查找更多长期记忆（历史排障经验、已保存的规则）时，使用 searchMemory 工具。\n");
         systemPromptBuilder.append("若采纳某条历史经验，必须在回答中写明「采用经验: <expId>」。条目头部的可信度/等级来自生命周期元数据，不要使用 JSON 内过期的 confidence。\n");
-        systemPromptBuilder.append("当需要查询腾讯云 CLS 日志时，先调用 loadSkill，name 为 cls-log-query，严格按返回的顺序使用 MCP 工具：SearchLog 前必须先 TextToSearchLogQuery；本环境几乎无键值索引，禁止 level:ERROR 以及 UnknownHostException: 这类「异常类名:」字段检索，改用全文 ERROR 或 \"UnknownHostException\"；同一条非法 CQL 失败后禁止原样重试。不确定有哪些 skill 时先调用 listSkills。\n\n");
+        systemPromptBuilder.append("当需要查询腾讯云 CLS 日志时，先调用 loadSkill，name 为 cls-log-query，严格按返回的顺序使用 MCP 工具：SearchLog 前必须先 TextToSearchLogQuery；本环境几乎无键值索引，禁止 level:ERROR 以及 UnknownHostException: 这类「异常类名:」字段检索，改用全文 ERROR 或 \"UnknownHostException\"；同一条非法 CQL 失败后禁止原样重试。禁止对日志主题调用 QueryMetric（会报 the topic is not metric topic），指标用 queryPrometheusAlerts。不确定有哪些 skill 时先调用 listSkills。\n\n");
 
         // 注入召回的历史经验（仅供参考，必须验证）
         if (experienceBlock != null && !experienceBlock.isBlank()) {

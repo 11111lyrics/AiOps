@@ -11,7 +11,7 @@ description: 查询腾讯云 CLS 日志时使用。包含 MCP 工具调用顺序
 
 - **Region**：必须使用连字符格式 `ap-chengdu`，禁止 `apchengdu` 或下划线
 - **日志集**：`tjxt-dev-logset-ap-chengdu`
-- **采集路径**：`/data/tjxt/logs/{service}/**/spring.log`（LogListener 机器组 `tjxt`）
+- **采集路径**：微服务 `/data/tjxt/logs/{service}/**/spring.log`；MySQL 慢查询 `/data/tjxt/logs/mysql/**/slow.log`（LogListener 机器组 `tjxt`）
 - **索引**：业务主题只有全文索引 + `__CONTENT__`，**几乎没有键值字段**。CQL 里 `标识符:` 会被当成字段检索。禁止 `level:ERROR`，也禁止把异常类当字段：`UnknownHostException:` / `ConnectException:` / `SQLException:`（会报 `field: xxx is not indexed`）。MCP 工具说明里的 `level:ERROR` 示例对本环境无效，不要照抄。
 
 ## MCP 调用顺序（必须遵守）
@@ -24,6 +24,8 @@ description: 查询腾讯云 CLS 日志时使用。包含 MCP 工具调用顺序
 
 告警类：`DescribeAlarms` / `DescribeAlertRecordHistory` / `GetAlarmLog`  
 时间反查：`ConvertTimestampToTimeString`
+
+**禁止 `QueryMetric` / `QueryMetrics`**：本环境全部是日志主题（log topic），不是指标主题（metric topic）。对 `tjxt-dev-*-log-ap-chengdu` 调 `QueryMetric` 会报 `the topic is not metric topic`。指标只用 `queryPrometheusAlerts`，慢 SQL 用 `SearchLog` 查 `mysql-slow`。
 
 禁止编造日志内容。查日志使用 CLS MCP 工具，不要凭记忆填写日志原文。
 
@@ -39,6 +41,7 @@ tjxt-dev-{service-key}-log-ap-chengdu
 ```
 
 示例：`user-service` → `tjxt-dev-user-service-log-ap-chengdu`  
+MySQL 慢查询：`mysql-slow` → `tjxt-dev-mysql-slow-log-ap-chengdu`（不要补 `-service`）  
 查日志优先用 TopicId；没有 Id 时用 `GetTopicInfoByName` 按主题名搜索。
 
 当前环境的服务键 / 主题名 / TopicId 对照表由加载本 skill 时附加（来自运行时配置）。
@@ -50,6 +53,7 @@ tjxt-dev-{service-key}-log-ap-chengdu
 3. 登录 / token 查 **auth-service**
 4. 业务接口错误查 label 对应微服务主题
 5. 跨服务失败：先查调用方，再查被调用方
+6. 慢 SQL / 缺索引：查 **mysql-slow**，不要只查微服务 `spring.log`
 
 ## 常用 CQL（必须经 TextToSearchLogQuery 生成后再用）
 
@@ -64,6 +68,7 @@ tjxt-dev-{service-key}-log-ap-chengdu
 | 数据库 | `"SQLException" OR "Communications link failure" OR "Too many connections"` |
 | 超时 | `timeout OR "TimeoutException"` |
 | 网关 | `"服务不存在" OR "503"` |
+| MySQL 慢查询 | `"Query_time" OR "Rows_examined" OR SELECT`（主题 mysql-slow） |
 
 ## Limit=10 且日志几乎相同怎么办
 

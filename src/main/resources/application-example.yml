@@ -152,11 +152,178 @@ aiops:
     auto-import: true           # 启动与定时扫描 aiops-docs：新增入库、删除去向量、文件变化则重建
     path: ./aiops-docs
     sync-interval-ms: 1800000   # 30 分钟；首次延迟同样时长，避免与启动扫描重叠
+  # 一键排障编排（告警接入 → 根因分析 → 处置决策(LLM选模板填参) → 规划落地 → 风险分级 → 执行 → 验证 → 沉淀）
+  # 详见 docs/一键排障编排方案.md。LLM 出现在根因分析、处置决策与经验提炼。
+  orchestration:
+    rca:                          # 节点 ② 根因分析引擎
+      engine: plan-execute        # plan-execute = Planner/Executor/Supervisor 规划→执行→再规划；react = 单个 ReactAgent
+      recursion-limit: 40         # 内层 Supervisor 图最多走多少步（Planner / Executor 各算一步）
+      timeout-seconds: 480        # RCA 环节墙钟上限，超时即失败（SSE 总超时 600s）
+      heartbeat-seconds: 30       # 等待期间每隔多久向 SSE 推一行心跳
+      extract-conclusion-with-llm: true   # 报告尾部缺 JSON 结论时，再用一次无工具 LLM 调用从报告抽取
+      temperature: 0.3
+      max-tokens: 8000
+    remediation:
+      enabled: true               # false = 只 dry-run（不连 SSH、不执行、不做前置检查）；true 才会真正下发 playbook
+      auto-execute-levels: [L0, L1]   # 这些等级自动执行；L2 进入人工审批（两段式，POST /api/incidents/{id}/approve）
+      min-confidence-for-auto: 0.7    # RCA 置信度低于该值强制提升为 L2
+      ssh:                        # 自愈命令下发到哪台机器（tjxt 全栈虚机），凭据勿提交
+        host: 10.195.86.203
+        port: 10023
+        username: root
+        password: ${TJXT_SSH_PASS:}
+        connect-timeout-ms: 10000
+        command-timeout-ms: 120000
+        max-output-chars: 2000
+      circuit-breaker:
+        max-executions-per-hour: 10  # 同一 playbook + 目标 1 小时内最多执行次数，超过则 NO_ACTION
+      verify:
+        timeout-seconds: 150        # 轮询 Prometheus 等告警 resolved 的上限
+        interval-seconds: 15
+      max-replans: 3                # L2「其他建议」回到决策节点重选的次数上限
+    topology:                     # 服务依赖拓扑：把多条告警归并为「根候选」与「症状」
+      alert-components:           # alertname → 组件
+        MySQLDown: mysql
+        MySQLSlowQueries: mysql
+        RedisDown: redis
+        RabbitMQDown: rabbitmq
+        ServiceUnavailable: course
+        NacosDown: nacos
+      components:                 # depends-on 里的组件若也在告警，则本组件只是症状
+        mysql:    { criticality: high,   depends-on: [], aliases: [mysqld, "3306"] }
+        redis:    { criticality: high,   depends-on: [], aliases: ["6379"] }
+        rabbitmq: { criticality: high,   depends-on: [], aliases: [mq, rabbit, "5672", "15672"] }
+        nacos:    { criticality: high,   depends-on: [], aliases: ["8848"] }
+        course:   { criticality: medium, depends-on: [mysql, redis, rabbitmq, nacos], aliases: [course-service, tj-course, cs] }
+        auth:     { criticality: medium, depends-on: [mysql, redis, nacos], aliases: [auth-service, tj-auth] }
+        user:     { criticality: medium, depends-on: [mysql, redis, nacos], aliases: [user-service, tj-user] }
+        trade:    { criticality: medium, depends-on: [mysql, redis, rabbitmq, nacos], aliases: [trade-service, tj-trade] }
+        pay:      { criticality: medium, depends-on: [mysql, redis, rabbitmq, nacos], aliases: [pay-service, tj-pay] }
+        gateway:  { criticality: high,   depends-on: [nacos, course, auth, user, trade, pay], aliases: [gateway-service, tj-gateway] }
+    playbooks:                    # 自愈只能从这里选模板并填 {param}，不能自由生成命令；risk 决定自动执行还是人工审批
+      - id: start-mysql-container
+        title: 启动已停止的 MySQL 容器
+        component: mysql
+        target: "{container}"
+        risk: L1
+        match-alerts: [MySQLDown]
+        params:
+          container: { description: 容器名, choices: [mysql], default-value: mysql }
+        precondition: "docker inspect -f '{{.State.Status}}' {container}"   # 容器已在 running 则不适用
+        precondition-expect: "^(exited|created|dead)$"
+        commands: ["docker start {container}"]
+        verify-command: "docker inspect -f '{{.State.Status}}' {container}"
+        verify-expect: "^running$"
+        rollback: "docker stop {container}（恢复到执行前的停止状态）"
+        expected-effect: "mysql_up 恢复为 1，MySQLDown 在 2 分钟内 resolved，依赖 MySQL 的服务恢复"
+      - id: start-redis-container
+        title: 启动已停止的 Redis 容器
+        component: redis
+        target: "{container}"
+        risk: L1
+        match-alerts: [RedisDown]
+        params:
+          container: { description: 容器名, choices: [redis], default-value: redis }
+        precondition: "docker inspect -f '{{.State.Status}}' {container}"
+        precondition-expect: "^(exited|created|dead)$"
+        commands: ["docker start {container}"]
+        verify-command: "docker inspect -f '{{.State.Status}}' {container}"
+        verify-expect: "^running$"
+        rollback: "docker stop {container}"
+        expected-effect: "redis_up 恢复为 1，RedisDown 在 2 分钟内 resolved"
+      - id: start-rabbitmq-container
+        title: 启动已停止的 RabbitMQ 容器（容器名 mq）
+        component: rabbitmq
+        target: "{container}"
+        risk: L1
+        match-alerts: [RabbitMQDown]
+        params:
+          container: { description: 容器名, choices: [mq], default-value: mq }
+        precondition: "docker inspect -f '{{.State.Status}}' {container}"
+        precondition-expect: "^(exited|created|dead)$"
+        commands: ["docker start {container}"]
+        verify-command: "docker inspect -f '{{.State.Status}}' {container}"
+        verify-expect: "^running$"
+        rollback: "docker stop {container}"
+        expected-effect: "RabbitMQDown 在 2 分钟内 resolved，支付/消息类业务恢复"
+      - id: start-course-service
+        title: 启动已停止的 course-service 容器（tj-course）
+        component: course
+        target: "{container}"
+        risk: L1
+        match-alerts: [ServiceUnavailable]
+        match-keywords: [course-service, tj-course, "/cs/"]
+        params:
+          container: { description: 容器名, choices: [tj-course], default-value: tj-course }
+        precondition: "docker inspect -f '{{.State.Status}}' {container}"
+        precondition-expect: "^(exited|created|dead)$"
+        commands: ["docker start {container}"]
+        verify-command: "docker inspect -f '{{.State.Status}}' {container}"
+        verify-expect: "^running$"
+        rollback: "docker stop {container}"
+        expected-effect: "course-service 重新注册到 Nacos，网关 /cs/** 恢复 200"
+      - id: mysql-raise-max-connections
+        title: 调大 MySQL max_connections 缓解连接打满
+        component: mysql
+        target: mysql
+        risk: L2                  # 改运行参数：必须人工审批
+        match-keywords: ["Too many connections", max_connections, 连接打满, 连接耗尽, 连接数过多]
+        params:
+          container: { description: MySQL 容器, choices: [mysql], default-value: mysql }
+          max_connections: { description: 新的全局连接上限, choices: ["300", "500", "800"], default-value: "500" }
+        precondition: "docker inspect -f '{{.State.Status}}' {container}"
+        precondition-expect: "^running$"
+        commands:
+          - "docker exec {container} sh -c 'mysql -uroot -p\"$MYSQL_ROOT_PASSWORD\" -e \"SET GLOBAL max_connections={max_connections}; SHOW VARIABLES LIKE \\\"max_connections\\\";\"'"
+        verify-command: "docker exec {container} sh -c 'mysql -uroot -p\"$MYSQL_ROOT_PASSWORD\" -N -e \"SELECT @@max_connections\"'"
+        verify-expect: "^{max_connections}$"
+        rollback: "SET GLOBAL max_connections=151（原默认值）"
+        expected-effect: "新连接可建立，Too many connections 停止刷新；仍需排查连接泄漏（SHOW PROCESSLIST）"
+      - id: mysql-add-course-name-index
+        title: 为 tj_course.course.name 补二级索引
+        component: mysql
+        target: mysql
+        risk: L2
+        match-alerts: [MySQLSlowQueries]
+        match-keywords: [慢查询, Query_time, Rows_examined, tj_course.course, course.name, 缺索引, 全表扫, GROUP BY, 按名聚合]
+        params:
+          container: { description: MySQL 容器, choices: [mysql], default-value: mysql }
+          schema: { description: 库名, choices: [tj_course], default-value: tj_course }
+          table: { description: 表名, choices: [course], default-value: course }
+          index: { description: 索引名, choices: [idx_name], default-value: idx_name }
+          column: { description: 列名, choices: [name], default-value: name }
+        precondition: "docker exec {container} sh -c 'mysql -uroot -p\"$MYSQL_ROOT_PASSWORD\" -N -e \"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=\\\"{schema}\\\" AND TABLE_NAME=\\\"{table}\\\" AND INDEX_NAME=\\\"{index}\\\"\"'"
+        precondition-expect: "^0$"
+        commands:
+          - "docker exec {container} sh -c 'mysql -uroot -p\"$MYSQL_ROOT_PASSWORD\" -e \"ALTER TABLE {schema}.{table} ADD INDEX {index} ({column}); SHOW INDEX FROM {schema}.{table};\"'"
+        verify-command: "docker exec {container} sh -c 'mysql -uroot -p\"$MYSQL_ROOT_PASSWORD\" -N -e \"SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=\\\"{schema}\\\" AND TABLE_NAME=\\\"{table}\\\" AND INDEX_NAME=\\\"{index}\\\" LIMIT 1\"'"
+        verify-expect: "^{index}$"
+        rollback: "ALTER TABLE {schema}.{table} DROP INDEX {index}"
+        expected-effect: "按课程名前缀检索或 GROUP BY name 不再全表扫描 tj_course.course；慢日志里针对 name 的 SELECT 应下降"
+      - id: mysql-add-order-user-index
+        title: 为 tj_trade.order.user_id 补二级索引
+        component: mysql
+        target: mysql
+        risk: L2
+        match-keywords: [tj_trade.order, order.user_id, 订单慢查询]
+        params:
+          container: { description: MySQL 容器, choices: [mysql], default-value: mysql }
+          schema: { description: 库名, choices: [tj_trade], default-value: tj_trade }
+          table: { description: 表名, choices: [order], default-value: order }
+          index: { description: 索引名, choices: [idx_user_id], default-value: idx_user_id }
+          column: { description: 列名, choices: [user_id], default-value: user_id }
+        precondition: "docker exec {container} sh -c 'mysql -uroot -p\"$MYSQL_ROOT_PASSWORD\" -N -e \"SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=\\\"{schema}\\\" AND TABLE_NAME=\\\"{table}\\\" AND INDEX_NAME=\\\"{index}\\\"\"'"
+        precondition-expect: "^0$"
+        commands:
+          - "docker exec {container} sh -c 'mysql -uroot -p\"$MYSQL_ROOT_PASSWORD\" -e \"ALTER TABLE {schema}.\\`{table}\\` ADD INDEX {index} ({column}); SHOW INDEX FROM {schema}.\\`{table}\\`;\"'"
+        verify-command: "docker exec {container} sh -c 'mysql -uroot -p\"$MYSQL_ROOT_PASSWORD\" -N -e \"SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=\\\"{schema}\\\" AND TABLE_NAME=\\\"{table}\\\" AND INDEX_NAME=\\\"{index}\\\" LIMIT 1\"'"
+        verify-expect: "^{index}$"
+        rollback: "ALTER TABLE {schema}.`{table}` DROP INDEX {index}"
+        expected-effect: "按 user_id 查订单不再全表扫描 tj_trade.order"
 
 prometheus:
-  # 经本机 SSH 隧道访问 tjxt。先运行: ssh -N -o ServerAliveInterval=30 -L 9090:127.0.0.1:9090 -p 10023 root@10.195.86.203
-  # 不要用 192.168.150.101:9090（经验库虚机误装）
-  base-url: http://127.0.0.1:9090
+  # 远端 tjxt 宿主机映射的 Prometheus，不要走本机 127.0.0.1 或经验库虚机 192.168.150.101
+  base-url: http://10.195.86.203:9090
   timeout: 15
 
 # CLS 云日志服务配置
@@ -179,6 +346,7 @@ cls:
     user-service: "b835073e-660c-4dca-aaf9-403929ace17f"           # tjxt-dev-user-service-log-ap-chengdu
     gateway-service: "73ea9f48-b5a6-4704-99e2-1a0d5b69bf32"        # tjxt-dev-gateway-service-log-ap-chengdu
     auth-service: "68595b30-a1e3-4754-8fd6-8a305a288d28"          # tjxt-dev-auth-service-log-ap-chengdu
+    mysql-slow: "9cddac58-51e9-442a-acc9-3f9ac1b24380"            # tjxt-dev-mysql-slow-log-ap-chengdu
 
 memory:
   window-size: 6

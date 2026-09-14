@@ -35,6 +35,52 @@ CREATE TABLE IF NOT EXISTS experience_meta (
     KEY idx_last_used (last_used)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='长期经验生命周期元数据';
 
+-- 一键排障事件：七节点编排的白板快照与状态机（两段式审批跨请求靠此表续跑）
+CREATE TABLE IF NOT EXISTS incident (
+    id              VARCHAR(64)  NOT NULL,
+    status          VARCHAR(32)  NOT NULL,
+    provider        VARCHAR(32)  NULL,
+    firing_names    TEXT         NULL,
+    root_components VARCHAR(255) NULL,
+    risk_level      VARCHAR(8)   NULL,
+    decision        VARCHAR(32)  NULL,
+    report_md       MEDIUMTEXT   NULL,
+    state_json      MEDIUMTEXT   NULL,
+    error           TEXT         NULL,
+    approved_by     VARCHAR(64)  NULL,
+    approve_comment TEXT         NULL,
+    created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_status (status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一键排障事件与白板快照';
+
+-- 一键排障审计：每个节点的关键事件
+CREATE TABLE IF NOT EXISTS incident_audit (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    incident_id VARCHAR(64)  NOT NULL,
+    node        VARCHAR(32)  NOT NULL,
+    event       VARCHAR(64)  NOT NULL,
+    detail      MEDIUMTEXT   NULL,
+    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_incident (incident_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一键排障节点审计';
+
+-- 自愈动作：每条实际（或模拟）执行的 playbook 命令，供熔断计数
+CREATE TABLE IF NOT EXISTS incident_action (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    incident_id VARCHAR(64)  NOT NULL,
+    playbook_id VARCHAR(64)  NOT NULL,
+    target      VARCHAR(128) NULL,
+    command     TEXT         NOT NULL,
+    exit_code   INT          NULL,
+    simulated   TINYINT(1)   NOT NULL DEFAULT 0,
+    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_playbook_time (playbook_id, target, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='自愈 playbook 执行记录';
+
 -- 弱触发临时经验（带 TTL，定时清理）
 CREATE TABLE IF NOT EXISTS experience_temp (
     id          BIGINT       NOT NULL AUTO_INCREMENT,
@@ -50,3 +96,48 @@ CREATE TABLE IF NOT EXISTS experience_temp (
     KEY idx_exp (exp_id),
     KEY idx_expire (expire_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='弱触发临时经验';
+
+-- 一键排障事件：段 A 结束后把整张白板写入 state_json，L2 审批后再用它起段 B
+CREATE TABLE IF NOT EXISTS incident (
+    id               VARCHAR(64)  NOT NULL,
+    status           VARCHAR(32)  NOT NULL,
+    provider         VARCHAR(32)  NULL,
+    firing_names     VARCHAR(512) NULL,
+    root_components  VARCHAR(256) NULL,
+    risk_level       VARCHAR(8)   NULL,
+    decision         VARCHAR(32)  NULL,
+    report_md        MEDIUMTEXT   NULL,
+    state_json       MEDIUMTEXT   NULL,
+    error            TEXT         NULL,
+    approved_by      VARCHAR(64)  NULL,
+    approve_comment  VARCHAR(512) NULL,
+    created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_status_created (status, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一键排障事件';
+
+CREATE TABLE IF NOT EXISTS incident_audit (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    incident_id VARCHAR(64)  NOT NULL,
+    node        VARCHAR(32)  NOT NULL,
+    event       VARCHAR(64)  NOT NULL,
+    detail      MEDIUMTEXT   NULL,
+    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_incident (incident_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一键排障节点审计';
+
+CREATE TABLE IF NOT EXISTS incident_action (
+    id          BIGINT       NOT NULL AUTO_INCREMENT,
+    incident_id VARCHAR(64)  NOT NULL,
+    playbook_id VARCHAR(64)  NOT NULL,
+    target      VARCHAR(128) NULL,
+    command     TEXT         NOT NULL,
+    exit_code   INT          NULL,
+    simulated   TINYINT      NOT NULL DEFAULT 0,
+    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    KEY idx_playbook_target_time (playbook_id, target, created_at),
+    KEY idx_incident (incident_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='一键排障自愈动作（熔断计数）';
